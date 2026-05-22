@@ -134,7 +134,7 @@ except ImportError:
         yield {"event": "error", "message": "Conversation loop not available"}
 
 
-app = FastAPI(title="Episodic, Semantic & Procedural Memory API", version="0.3.0")
+app = FastAPI(title="Episodic, Semantic & Procedural Memory API", version="0.4.0-phas1")
 
 
 class StoreRequest(BaseModel):
