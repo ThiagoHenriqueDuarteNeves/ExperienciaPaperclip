@@ -1,8 +1,20 @@
 import Anthropic from "@anthropic-ai/sdk";
 
-const anthropic = new Anthropic({
-  apiKey: process.env.CLAUDE_API_KEY || process.env.ANTHROPIC_API_KEY || "",
-});
+// Support both Anthropic and Deepseek (Deepseek provides Anthropic-compatible API)
+const getAnthropicClient = () => {
+  const apiKey = process.env.CLAUDE_API_KEY || process.env.ANTHROPIC_API_KEY || "";
+  const provider = process.env.LLM_PROVIDER || "anthropic";
+  const baseURL = provider === "deepseek" 
+    ? "https://api.deepseek.com/anthropic"
+    : process.env.ANTHROPIC_BASE_URL || undefined;
+
+  return new Anthropic({
+    apiKey,
+    ...(baseURL && { baseURL }),
+  });
+};
+
+const anthropic = getAnthropicClient();
 
 /** Shared system prompt — cached across requests via ephemeral breakpoint. */
 const SYSTEM_PROMPT = `You are a human-like conversational AI with a 4-tier memory system.

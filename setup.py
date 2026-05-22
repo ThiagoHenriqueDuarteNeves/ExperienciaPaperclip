@@ -57,18 +57,34 @@ def main() -> None:
 
     env = load_env()
 
-    # --- Anthropic / Claude API key ---
-    print("\n[1/3] Anthropic API Key (Claude)")
-    print("  Provide your Anthropic API key to enable Claude-powered features.")
-    anthropic_key = prompt(
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_API_KEY",
-        current=env.get("ANTHROPIC_API_KEY"),
-        secret=True,
-    )
+    # --- LLM Provider ---
+    print("\n[1/4] LLM Provider Selection")
+    print("  Choose your LLM provider:")
+    print("  1) Anthropic (Claude models)")
+    print("  2) Deepseek (v4 with Anthropic-compatible API)")
+    provider_choice = input("  Select (1 or 2, default: 1): ").strip() or "1"
+    
+    if provider_choice == "2":
+        provider = "deepseek"
+        print("  Selected: Deepseek (https://api.deepseek.com/anthropic)")
+        api_key = prompt(
+            "ANTHROPIC_API_KEY",
+            "Deepseek API Key",
+            current=env.get("ANTHROPIC_API_KEY"),
+            secret=True,
+        )
+    else:
+        provider = "anthropic"
+        print("  Selected: Anthropic (https://api.anthropic.com)")
+        api_key = prompt(
+            "ANTHROPIC_API_KEY",
+            "Anthropic API Key",
+            current=env.get("ANTHROPIC_API_KEY"),
+            secret=True,
+        )
 
     # --- Letta / MemGPT ---
-    print("\n[2/3] Letta (MemGPT)")
+    print("\n[2/4] Letta (MemGPT)")
     print("  Letta provides the procedural memory tier.")
     letta_url = prompt(
         "LETTA_BASE_URL",
@@ -84,7 +100,8 @@ def main() -> None:
 
     # --- Write ---
     write_env({
-        "ANTHROPIC_API_KEY": anthropic_key,
+        "LLM_PROVIDER": provider,
+        "ANTHROPIC_API_KEY": api_key,
         "LETTA_BASE_URL": letta_url,
         "LETTA_API_KEY": letta_key,
     })

@@ -100,6 +100,7 @@ services:
       - MEMORY_PGVECTOR_DATABASE=memory_db
       - MEMORY_LETTA_BASE_URL=http://letta:8283
       - MEMORY_LETTA_API_KEY=${LETTA_API_KEY:-letta-local-dev-key}
+      - MEMORY_LLM_PROVIDER=${LLM_PROVIDER:-anthropic}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
     depends_on:
       memory-db:

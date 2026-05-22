@@ -5,7 +5,7 @@ sentence-transformers>=3.4.0,<4.0.0
 pydantic-settings>=2.7.0,<3.0.0
 neo4j>=5.27.0,<6.0.0
 httpx>=0.28.0,<1.0.0
-letta-client>=0.6.0,<1.0.0
+letta-client>=0.6.0
 
 # Phase 1 additions: pgvector, LangGraph, MCP
 asyncpg>=0.30.0,<1.0.0

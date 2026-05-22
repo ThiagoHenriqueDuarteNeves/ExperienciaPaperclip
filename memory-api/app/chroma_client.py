@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 
 import chromadb
@@ -5,7 +7,9 @@ from chromadb import Collection
 
 from app.config import settings
 
-_client: chromadb.HttpClient | chromadb.PersistentClient | None = None
+# Postponed evaluation of annotations avoids runtime errors when imported
+# in environments where chromadb exports callables instead of typing objects.
+_client: "chromadb.HttpClient | chromadb.PersistentClient | None" = None
 
 
 def get_client() -> chromadb.HttpClient | chromadb.PersistentClient:

@@ -454,8 +454,9 @@ async def _call_claude(
 ) -> dict | None:
     """Send a request to the Claude API and return the parsed response."""
     try:
+        api_url = f"{settings.effective_llm_api_base}/messages"
         resp = await http.post(
-            "https://api.anthropic.com/v1/messages",
+            api_url,
             headers={
                 "x-api-key": api_key,
                 "anthropic-version": "2023-06-01",
