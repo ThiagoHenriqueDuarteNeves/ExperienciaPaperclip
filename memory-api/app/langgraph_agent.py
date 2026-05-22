@@ -88,7 +88,7 @@ def _build_graph() -> CompiledStateGraph:
             f"You are a helpful AI assistant with memory.\n"
             f"Relevant past context:\n{context_str}\n"
             f"Thread history:\n"
-            f"{[f\"{m['role']}: {m['content']}\" for m in state.get('messages', [])]}"
+            "; ".join(f"{m['role']}: {m['content']}" for m in state.get("messages", []))
         )
 
         async with httpx.AsyncClient(timeout=60) as http:
