@@ -1,4 +1,4 @@
-"""Embedding providers: OpenAI (1536-dim, primary) with local fallback."""
+"""Embedding providers: API-based (Deepseek-compatible, primary) with local fallback."""
 
 from __future__ import annotations
 
@@ -48,29 +48,50 @@ def _get_local_model() -> SentenceTransformer:
 
 
 def _embedding_api_key() -> str:
-    return settings.embedding_api_key or settings.effective_claude_api_key or ""
+    """Return the effective embedding API key or empty string.
+
+    Uses the provider-aware property from settings so that:
+    - Anthropic provider → returns "" (use local model)
+    - Deepseek provider → returns Deepseek API key
+    - Explicit MEMORY_EMBEDDING_API_KEY → always takes precedence
+    """
+    return settings.effective_embedding_api_key
 
 
-# -- Async API embeddings (primary, 1536-dim) --
+def _embedding_api_base() -> str:
+    """Return the effective embedding API base URL or empty string.
+
+    Uses the provider-aware property from settings so that:
+    - Anthropic provider → returns "" (use local model)
+    - Deepseek provider → returns Deepseek's embedding endpoint
+    - Explicit MEMORY_EMBEDDING_API_BASE → always takes precedence
+    """
+    return settings.effective_embedding_api_base
+
+
+def _can_use_api() -> bool:
+    """Check if API embeddings are available (both key and base URL required)."""
+    return bool(_embedding_api_key()) and bool(_embedding_api_base())
+
+
+# -- Async API embeddings (primary) --
 
 
 async def embed_text_async(text: str) -> list[float]:
-    api_key = _embedding_api_key()
-    if api_key:
+    if _can_use_api():
         key = _cache_key(text)
         cached = _cache_get(key)
         if cached is not None:
             return cached
-        vec = await _embed_api(text, api_key)
+        vec = await _embed_api(text, _embedding_api_key())
         _cache_set(key, vec)
         return vec
     return _embed_local(text)
 
 
 async def embed_texts_async(texts: list[str]) -> list[list[float]]:
-    api_key = _embedding_api_key()
-    if api_key:
-        return await _embed_api_batch(texts, api_key)
+    if _can_use_api():
+        return await _embed_api_batch(texts, _embedding_api_key())
     return _embed_local_batch(texts)
 
 
@@ -78,22 +99,20 @@ async def embed_texts_async(texts: list[str]) -> list[list[float]]:
 
 
 def embed_text(text: str) -> list[float]:
-    api_key = _embedding_api_key()
-    if api_key:
+    if _can_use_api():
         key = _cache_key(text)
         cached = _cache_get(key)
         if cached is not None:
             return cached
-        vec = _embed_api_sync(text, api_key)
+        vec = _embed_api_sync(text, _embedding_api_key())
         _cache_set(key, vec)
         return vec
     return _embed_local(text)
 
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
-    api_key = _embedding_api_key()
-    if api_key:
-        return _embed_api_batch_sync(texts, api_key)
+    if _can_use_api():
+        return _embed_api_batch_sync(texts, _embedding_api_key())
     return _embed_local_batch(texts)
 
 
@@ -114,7 +133,7 @@ def _embed_local_batch(texts: list[str]) -> list[list[float]]:
 async def _embed_api(text: str, api_key: str) -> list[float]:
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
-            f"{settings.embedding_api_base}/embeddings",
+            f"{_embedding_api_base()}/embeddings",
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             json={"model": settings.embedding_api_model, "input": text},
         )
@@ -125,7 +144,7 @@ async def _embed_api(text: str, api_key: str) -> list[float]:
 async def _embed_api_batch(texts: list[str], api_key: str) -> list[list[float]]:
     async with httpx.AsyncClient(timeout=60) as client:
         resp = await client.post(
-            f"{settings.embedding_api_base}/embeddings",
+            f"{_embedding_api_base()}/embeddings",
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             json={"model": settings.embedding_api_model, "input": texts},
         )
@@ -135,7 +154,7 @@ async def _embed_api_batch(texts: list[str], api_key: str) -> list[list[float]]:
 
 def _embed_api_sync(text: str, api_key: str) -> list[float]:
     resp = httpx.post(
-        f"{settings.embedding_api_base}/embeddings",
+        f"{_embedding_api_base()}/embeddings",
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         json={"model": settings.embedding_api_model, "input": text},
         timeout=30,
@@ -146,7 +165,7 @@ def _embed_api_sync(text: str, api_key: str) -> list[float]:
 
 def _embed_api_batch_sync(texts: list[str], api_key: str) -> list[list[float]]:
     resp = httpx.post(
-        f"{settings.embedding_api_base}/embeddings",
+        f"{_embedding_api_base()}/embeddings",
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         json={"model": settings.embedding_api_model, "input": texts},
         timeout=60,

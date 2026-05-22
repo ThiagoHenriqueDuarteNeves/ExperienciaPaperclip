@@ -101,6 +101,13 @@ services:
       - MEMORY_LETTA_BASE_URL=http://letta:8283
       - MEMORY_LETTA_API_KEY=${LETTA_API_KEY:-letta-local-dev-key}
       - MEMORY_LLM_PROVIDER=${LLM_PROVIDER:-anthropic}
+      # Embedding configuration
+      # For Deepseek: set MEMORY_EMBEDDING_API_BASE=https://api.deepseek.com/v1 and DEEPSEEK_API_KEY
+      # For Anthropic (uses local model by default): leave these unset
+      - MEMORY_EMBEDDING_API_BASE=${MEMORY_EMBEDDING_API_BASE:-}
+      - MEMORY_EMBEDDING_API_KEY=${MEMORY_EMBEDDING_API_KEY:-}
+      - MEMORY_EMBEDDING_API_MODEL=${MEMORY_EMBEDDING_API_MODEL:-text-embedding-3-large}
+      - MEMORY_DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
     depends_on:
       memory-db:
