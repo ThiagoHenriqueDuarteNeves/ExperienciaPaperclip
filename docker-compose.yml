@@ -1,0 +1,119 @@
+services:
+  neo4j:
+    image: neo4j:5-community-ubi9
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j_data:/data
+    environment:
+      - NEO4J_AUTH=neo4j/semantic-memory-local
+      - NEO4J_PLUGINS=["apoc"]
+      - NEO4J_dbms_security_procedures_unrestricted=apoc.*
+    healthcheck:
+      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "semantic-memory-local", "RETURN 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  chromadb:
+    image: chromadb/chroma:0.6.3
+    ports:
+      - "8000:8000"
+    volumes:
+      - chromadb_data:/chroma/chroma
+    environment:
+      - IS_PERSISTENT=TRUE
+      - PERSIST_DIRECTORY=/chroma/chroma
+      - ALLOW_RESET=TRUE
+      - CHROMA_SERVER_CORS_ALLOW_ORIGINS=["*"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/heartbeat')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  memory-db:
+    image: pgvector/pgvector:pg16
+    ports:
+      - "5434:5432"
+    volumes:
+      - memory_db_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+    environment:
+      - POSTGRES_USER=memory
+      - POSTGRES_PASSWORD=memory-local
+      - POSTGRES_DB=memory_db
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memory -d memory_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  letta-db:
+    image: pgvector/pgvector:pg16
+    ports:
+      - "5433:5432"
+    volumes:
+      - letta_db_data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_USER=letta
+      - POSTGRES_PASSWORD=letta-local
+      - POSTGRES_DB=letta
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U letta"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  letta:
+    image: letta/letta:latest
+    ports:
+      - "8283:8283"
+    volumes:
+      - letta_data:/app/data
+    environment:
+      - LETTA_DATABASE_URL=postgresql://letta:letta-local@letta-db:5432/letta
+      - LETTA_DATABASE_TYPE=postgres
+      - LETTA_SERVER_PASS=${LETTA_API_KEY:-letta-local-dev-key}
+    depends_on:
+      letta-db:
+        condition: service_healthy
+
+  memory-api:
+    build: ./memory-api
+    ports:
+      - "8001:8001"
+    environment:
+      - MEMORY_CHROMADB_HOST=chromadb
+      - MEMORY_CHROMADB_PORT=8000
+      - MEMORY_CHROMADB_USE_LOCAL=false
+      - MEMORY_SIMILARITY_TOP_K=5
+      - MEMORY_MIN_SIMILARITY_THRESHOLD=0.65
+      - MEMORY_NEO4J_URI=bolt://neo4j:7687
+      - MEMORY_NEO4J_USER=neo4j
+      - MEMORY_NEO4J_PASSWORD=semantic-memory-local
+      - MEMORY_PGVECTOR_HOST=memory-db
+      - MEMORY_PGVECTOR_PORT=5432
+      - MEMORY_PGVECTOR_USER=memory
+      - MEMORY_PGVECTOR_PASSWORD=memory-local
+      - MEMORY_PGVECTOR_DATABASE=memory_db
+      - MEMORY_LETTA_BASE_URL=http://letta:8283
+      - MEMORY_LETTA_API_KEY=${LETTA_API_KEY:-letta-local-dev-key}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    depends_on:
+      memory-db:
+        condition: service_healthy
+      chromadb:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      letta:
+        condition: service_started
+
+volumes:
+  memory_db_data:
+  chromadb_data:
+  neo4j_data:
+  letta_db_data:
+  letta_data:
