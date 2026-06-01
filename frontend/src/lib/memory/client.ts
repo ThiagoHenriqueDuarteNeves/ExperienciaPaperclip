@@ -1,6 +1,14 @@
 const MEMORY_API_BASE =
   process.env.MEMORY_API_URL || "http://localhost:8001";
 
+// Headers padrão para a memory-api. O `skip_zrok_interstitial` (qualquer valor)
+// pula a página de aviso do zrok quando a API é exposta por um share público —
+// sem ele, requisições de API recebem HTML da interstitial em vez do JSON.
+const MEMORY_API_HEADERS: Record<string, string> = {
+  "Content-Type": "application/json",
+  skip_zrok_interstitial: "true",
+};
+
 export interface MemorySearchResult {
   id: string;
   content: string;
@@ -41,7 +49,7 @@ export async function storeMemory(
 ): Promise<string> {
   const res = await fetch(`${MEMORY_API_BASE}/store`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: MEMORY_API_HEADERS,
     body: JSON.stringify({
       user_id: userId,
       conversation_id: conversationId,
@@ -63,7 +71,7 @@ export async function recallMemories(
 ): Promise<MemorySearchResult[]> {
   const res = await fetch(`${MEMORY_API_BASE}/retrieve`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: MEMORY_API_HEADERS,
     body: JSON.stringify({ query, user_id: userId, top_k: topK }),
   });
   if (!res.ok) throw new Error(`Retrieve failed: ${res.status}`);
@@ -79,7 +87,7 @@ export async function recallConversationMemories(
 ): Promise<ConversationMemoryResult[]> {
   const res = await fetch(`${MEMORY_API_BASE}/memory/search`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: MEMORY_API_HEADERS,
     body: JSON.stringify({ query, user_id: userId, top_k: topK }),
   });
   if (!res.ok) throw new Error(`Conversation memory search failed: ${res.status}`);
@@ -96,7 +104,7 @@ export async function storeConversationMessage(
 ): Promise<string> {
   const res = await fetch(`${MEMORY_API_BASE}/memory/messages`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: MEMORY_API_HEADERS,
     body: JSON.stringify({
       thread_id: threadId,
       role,
@@ -118,7 +126,7 @@ export async function searchSemanticFacts(
 ): Promise<MemorySearchResult[]> {
   const res = await fetch(`${MEMORY_API_BASE}/memory/semantic/search`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: MEMORY_API_HEADERS,
     body: JSON.stringify({
       query,
       user_id: userId,
@@ -138,7 +146,7 @@ export async function checkResponseConfidence(
 ): Promise<boolean> {
   const res = await fetch(`${MEMORY_API_BASE}/memory/confidence`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: MEMORY_API_HEADERS,
     body: JSON.stringify({ text, threshold }),
   });
   if (!res.ok) return true; // fail open: persist on error
@@ -153,7 +161,7 @@ export async function searchGraph(
 ): Promise<GraphEntity[]> {
   const res = await fetch(`${MEMORY_API_BASE}/graph/search`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: MEMORY_API_HEADERS,
     body: JSON.stringify({ query, type_filter: typeFilter }),
   });
   if (!res.ok) throw new Error(`Graph search failed: ${res.status}`);
@@ -172,7 +180,7 @@ export async function* runConversationLoop(
 ): AsyncGenerator<ConversationEvent> {
   const res = await fetch(`${MEMORY_API_BASE}/conversation`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: MEMORY_API_HEADERS,
     body: JSON.stringify({
       user_id: userId,
       conversation_id: conversationId,
