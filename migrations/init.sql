@@ -5,12 +5,14 @@ CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 -- Thread-scoped conversation history
+-- NOTE: embeddings use intfloat/multilingual-e5-large (local, 1024-dim) by default.
+-- API override possible via MEMORY_EMBEDDING_API_BASE + KEY (must also be 1024-dim).
 CREATE TABLE IF NOT EXISTS conversation_messages (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     thread_id UUID NOT NULL,
     role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'tool', 'system')),
     content TEXT NOT NULL,
-    embedding vector(1536),
+    embedding vector(1024),
     metadata JSONB DEFAULT '{}',
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -28,7 +30,7 @@ CREATE TABLE IF NOT EXISTS semantic_memory (
     user_id TEXT NOT NULL,
     key TEXT NOT NULL,
     content TEXT NOT NULL,
-    embedding vector(1536),
+    embedding vector(1024),
     importance REAL DEFAULT 0.0,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),

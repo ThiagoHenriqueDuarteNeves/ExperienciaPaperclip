@@ -1,9 +1,15 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+import logging
+import math
 
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, Field
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 from app.chroma_client import health as chroma_health
+from app.logging_config import configure_logging
 from app.retrieval import delete_memory, retrieve_similar, store_conversation
 
 # Phase 1: pgvector-backed memory
@@ -14,6 +20,9 @@ from app.conversation_store import (
 )
 from app.pgvector_client import health as pgvector_health
 from app.semantic_store import search_semantic_memories, store_semantic_memory
+
+configure_logging()
+logger = logging.getLogger(__name__)
 
 # Phase 1: LangGraph agent
 try:
@@ -124,23 +133,26 @@ except ImportError:
         return []
 
 
-try:
-    from app.conversation_loop import run_conversation_loop
-    _CONVERSATION_LOOP_AVAILABLE = True
-except ImportError:
-    _CONVERSATION_LOOP_AVAILABLE = False
-
-    async def run_conversation_loop(*args, **kwargs):
-        yield {"event": "error", "message": "Conversation loop not available"}
+# Conversation loop is not yet fully implemented — routes return 501.
+_CONVERSATION_LOOP_AVAILABLE = False
 
 
-app = FastAPI(title="Episodic, Semantic & Procedural Memory API", version="0.4.0-phas1")
+limiter = Limiter(key_func=get_remote_address)
+
+app = FastAPI(title="Episodic, Semantic & Procedural Memory API", version="0.4.0-phase1")
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+# ---------------------------------------------------------------------------
+# Request / Response models
+# ---------------------------------------------------------------------------
 
 
 class StoreRequest(BaseModel):
-    user_id: str
-    conversation_id: str
-    content: str
+    user_id: str = Field(..., max_length=256)
+    conversation_id: str = Field(..., max_length=256)
+    content: str = Field(..., max_length=50_000)
     metadata: dict | None = None
     extract_kg: bool = True
 
@@ -150,9 +162,9 @@ class StoreResponse(BaseModel):
 
 
 class RetrieveRequest(BaseModel):
-    query: str
-    user_id: str | None = None
-    top_k: int | None = None
+    query: str = Field(..., max_length=2_000)
+    user_id: str | None = Field(default=None, max_length=256)
+    top_k: int | None = Field(default=None, ge=1, le=50)
 
 
 class MemoryItem(BaseModel):
@@ -167,37 +179,136 @@ class RetrieveResponse(BaseModel):
 
 
 class GraphSearchRequest(BaseModel):
-    query: str
-    type_filter: str | None = None
-    limit: int = 10
+    query: str = Field(..., max_length=2_000)
+    type_filter: str | None = Field(default=None, max_length=64)
+    limit: int = Field(default=10, ge=1, le=50)
 
 
 class GraphQueryRequest(BaseModel):
-    entity_name: str
-    depth: int = 2
+    entity_name: str = Field(..., max_length=512)
+    depth: int = Field(default=2, ge=1, le=5)
 
 
 class EnrichedSearchRequest(BaseModel):
-    query: str
-    user_id: str | None = None
-    top_k: int | None = None
+    query: str = Field(..., max_length=2_000)
+    user_id: str | None = Field(default=None, max_length=256)
+    top_k: int | None = Field(default=None, ge=1, le=50)
+
+
+class MessageStoreRequest(BaseModel):
+    thread_id: str = Field(..., max_length=256)
+    role: str = Field(..., pattern="^(user|assistant|system)$")
+    content: str = Field(..., max_length=50_000)
+    metadata: dict | None = None
+
+
+class MessageSearchRequest(BaseModel):
+    query: str = Field(..., max_length=2_000)
+    top_k: int = Field(default=5, ge=1, le=50)
+    user_id: str | None = Field(default=None, max_length=256)
+    min_similarity: float = Field(default=0.65, ge=0.0, le=1.0)
+
+
+class SemanticStoreRequest(BaseModel):
+    user_id: str = Field(..., max_length=256)
+    key: str = Field(..., max_length=512)
+    content: str = Field(..., max_length=50_000)
+    importance: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+class SemanticSearchRequest(BaseModel):
+    query: str = Field(..., max_length=2_000)
+    user_id: str | None = Field(default=None, max_length=256)
+    top_k: int = Field(default=5, ge=1, le=50)
+    min_similarity: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
+class AgentChatRequest(BaseModel):
+    message: str = Field(..., max_length=10_000)
+    thread_id: str | None = Field(default=None, max_length=256)
+    user_id: str | None = Field(default=None, max_length=256)
+
+
+class CreateAgentRequest(BaseModel):
+    name: str = Field(..., max_length=256)
+    human_block: str = Field(default="", max_length=2_000)
+    persona_block: str = Field(default="", max_length=2_000)
+    system_prompt: str | None = Field(default=None, max_length=10_000)
+
+
+class ArchivalInsertRequest(BaseModel):
+    content: str = Field(..., max_length=50_000)
+
+
+class ArchivalSearchRequest(BaseModel):
+    query: str = Field(..., max_length=2_000)
+    limit: int = Field(default=10, ge=1, le=50)
+
+
+class BlockUpdateRequest(BaseModel):
+    value: str = Field(..., max_length=2_000)
+
+
+class ConversationRequest(BaseModel):
+    user_id: str = Field(..., max_length=256)
+    conversation_id: str = Field(..., max_length=256)
+    message: str = Field(..., max_length=10_000)
+    history: list[dict] | None = None
+    agent_id: str | None = Field(default=None, max_length=256)
+
+
+class ConfidenceRequest(BaseModel):
+    text: str = Field(..., max_length=10_000)
+    threshold: float = Field(default=0.72, ge=0.0, le=1.0)
+
+
+# ---------------------------------------------------------------------------
+# Startup
+# ---------------------------------------------------------------------------
 
 
 @app.on_event("startup")
 async def on_startup():
-    """Initialize schema and run migrations on startup."""
+    """Initialize schema, run migrations, and validate API key on startup."""
+    from app.config import settings
+
+    # Log embedding mode
+    if settings.effective_embedding_api_key and settings.effective_embedding_api_base:
+        logger.info(
+            "startup: embeddings — API mode, base=%s model=%s",
+            settings.effective_embedding_api_base,
+            settings.embedding_api_model,
+        )
+    else:
+        logger.info(
+            "startup: embeddings — local model '%s' (%d-dim)",
+            settings.embedding_model,
+            settings.embedding_dimensions,
+        )
+
+    # Validate LLM API key for entity extraction
+    if not settings.effective_claude_api_key:
+        logger.warning(
+            "startup: LLM API key not configured — entity extraction will be skipped"
+        )
+    else:
+        logger.info("startup: LLM API key present — provider=%s", settings.llm_provider)
+
     try:
         init_schema()
     except Exception:
-        pass  # May not be connected yet during first startup
+        pass  # Neo4j may not be connected yet during first startup
 
-    # Phase 1: run pgvector migrations
     try:
         from app.migrations import run_migrations
-
         await run_migrations()
     except Exception:
         pass  # DB may not be ready yet during first startup
+
+
+# ---------------------------------------------------------------------------
+# Health
+# ---------------------------------------------------------------------------
 
 
 @app.get("/health")
@@ -226,8 +337,15 @@ async def get_health():
     }
 
 
+# ---------------------------------------------------------------------------
+# Episodic memory (ChromaDB)
+# ---------------------------------------------------------------------------
+
+
 @app.post("/store", response_model=StoreResponse)
-def store(req: StoreRequest):
+@limiter.limit("10/minute")
+def store(request: Request, req: StoreRequest):
+    logger.info("store: user_id=%s conversation_id=%s", req.user_id, req.conversation_id)
     memory_id = store_conversation(
         user_id=req.user_id,
         conversation_id=req.conversation_id,
@@ -239,7 +357,8 @@ def store(req: StoreRequest):
 
 
 @app.post("/retrieve", response_model=RetrieveResponse)
-def retrieve(req: RetrieveRequest):
+@limiter.limit("30/minute")
+def retrieve(request: Request, req: RetrieveRequest):
     results = retrieve_similar(
         query=req.query,
         user_id=req.user_id,
@@ -253,19 +372,21 @@ def delete(memory_id: str):
     delete_memory(memory_id)
 
 
-# --- Semantic / Knowledge Graph endpoints ---
+# ---------------------------------------------------------------------------
+# Knowledge graph (Neo4j)
+# ---------------------------------------------------------------------------
 
 
 @app.post("/graph/search")
-def graph_search(req: GraphSearchRequest):
-    """Search entities in the knowledge graph by name/description."""
+@limiter.limit("30/minute")
+def graph_search(request: Request, req: GraphSearchRequest):
     results = search_graph(query=req.query, type_filter=req.type_filter, limit=req.limit)
     return {"entities": results}
 
 
 @app.post("/graph/query")
-def graph_query(req: GraphQueryRequest):
-    """Query the knowledge graph centered on an entity."""
+@limiter.limit("30/minute")
+def graph_query(request: Request, req: GraphQueryRequest):
     result = query_graph(entity_name=req.entity_name, depth=req.depth)
     if result["entity"] is None:
         raise HTTPException(status_code=404, detail=f"Entity '{req.entity_name}' not found")
@@ -274,7 +395,6 @@ def graph_query(req: GraphQueryRequest):
 
 @app.get("/graph/entity/{name}")
 def graph_entity(name: str, depth: int = 2):
-    """Full graph neighborhood for an entity."""
     result = get_entity_graph(name, depth=depth)
     if result is None:
         raise HTTPException(status_code=404, detail=f"Entity '{name}' not found")
@@ -282,8 +402,8 @@ def graph_entity(name: str, depth: int = 2):
 
 
 @app.post("/search/enriched")
-def enriched_search(req: EnrichedSearchRequest):
-    """Hybrid retrieval: vector similarity + graph context."""
+@limiter.limit("30/minute")
+def enriched_search(request: Request, req: EnrichedSearchRequest):
     results = augment_with_graph_context(
         query=req.query,
         user_id=req.user_id,
@@ -293,43 +413,14 @@ def enriched_search(req: EnrichedSearchRequest):
 
 
 # ---------------------------------------------------------------------------
-# Phase 1: pgvector memory endpoints (async)
+# pgvector conversation memory
 # ---------------------------------------------------------------------------
 
 
-class MessageStoreRequest(BaseModel):
-    thread_id: str
-    role: str  # user, assistant, system
-    content: str
-    metadata: dict | None = None
-
-
-class MessageSearchRequest(BaseModel):
-    query: str
-    top_k: int = 5
-    user_id: str | None = None
-    min_similarity: float = 0.65
-
-
-class SemanticStoreRequest(BaseModel):
-    user_id: str
-    key: str
-    content: str
-    importance: float = 0.0
-
-
-class SemanticSearchRequest(BaseModel):
-    query: str
-    user_id: str | None = None
-    top_k: int = 5
-    min_similarity: float = 0.5
-
-
 @app.post("/memory/messages", status_code=201)
-async def store_message_endpoint(req: MessageStoreRequest):
-    """Store a conversation message with embedding in pgvector."""
-    if req.role not in ("user", "assistant", "system"):
-        raise HTTPException(status_code=400, detail="role must be user, assistant, or system")
+@limiter.limit("60/minute")
+async def store_message_endpoint(request: Request, req: MessageStoreRequest):
+    logger.info("memory/messages: thread_id=%s role=%s", req.thread_id, req.role)
     message_id = await store_message(
         thread_id=req.thread_id,
         role=req.role,
@@ -341,14 +432,13 @@ async def store_message_endpoint(req: MessageStoreRequest):
 
 @app.get("/memory/threads/{thread_id}")
 async def get_thread_endpoint(thread_id: str, limit: int = 100):
-    """Load full thread history from pgvector in chronological order."""
     messages = await retrieve_thread(thread_id, limit=limit)
     return {"thread_id": thread_id, "messages": messages, "count": len(messages)}
 
 
 @app.post("/memory/search")
-async def search_messages_endpoint(req: MessageSearchRequest):
-    """ANN similarity search over conversation messages using pgvector."""
+@limiter.limit("60/minute")
+async def search_messages_endpoint(request: Request, req: MessageSearchRequest):
     results = await search_conversations(
         query=req.query,
         top_k=req.top_k,
@@ -359,8 +449,9 @@ async def search_messages_endpoint(req: MessageSearchRequest):
 
 
 @app.post("/memory/semantic", status_code=201)
-async def store_semantic_endpoint(req: SemanticStoreRequest):
-    """Store a semantic memory fact with embedding (upsert)."""
+@limiter.limit("30/minute")
+async def store_semantic_endpoint(request: Request, req: SemanticStoreRequest):
+    logger.info("memory/semantic: user_id=%s key=%s", req.user_id, req.key)
     fact_id = await store_semantic_memory(
         user_id=req.user_id,
         key=req.key,
@@ -371,8 +462,8 @@ async def store_semantic_endpoint(req: SemanticStoreRequest):
 
 
 @app.post("/memory/semantic/search")
-async def search_semantic_endpoint(req: SemanticSearchRequest):
-    """Semantic search over stored facts using pgvector ANN."""
+@limiter.limit("60/minute")
+async def search_semantic_endpoint(request: Request, req: SemanticSearchRequest):
     results = await search_semantic_memories(
         query=req.query,
         user_id=req.user_id,
@@ -383,53 +474,81 @@ async def search_semantic_endpoint(req: SemanticSearchRequest):
 
 
 # ---------------------------------------------------------------------------
-# Phase 1: LangGraph agent endpoints
+# Confidence scoring endpoint
 # ---------------------------------------------------------------------------
 
+# Phrases that signal the assistant has no real answer to store.
+_UNCERTAINTY_PHRASES = [
+    "I don't know", "I don't have that information", "I'm not sure",
+    "Let me check", "I need to look that up", "I don't remember",
+    "não tenho essa informação", "não sei", "não lembro",
+    "vou verificar", "deixa eu pesquisar", "preciso consultar minha memória",
+    "realizando busca", "pesquisando nos bancos",
+]
 
-class AgentChatRequest(BaseModel):
-    message: str
-    thread_id: str | None = None
-    user_id: str | None = None
+# Lazy cache: populated on first call to avoid embedding overhead at startup.
+_uncertainty_embeddings: list[list[float]] | None = None
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    mag_a = math.sqrt(sum(x * x for x in a))
+    mag_b = math.sqrt(sum(x * x for x in b))
+    return dot / (mag_a * mag_b) if mag_a and mag_b else 0.0
+
+
+@app.post("/memory/confidence")
+@limiter.limit("120/minute")
+async def confidence_endpoint(request: Request, req: ConfidenceRequest):
+    """Return whether an assistant response is confident enough to be stored.
+
+    Embeds the response text and compares it against known uncertainty phrases
+    using cosine similarity. A high similarity to uncertainty phrases means the
+    response should not be persisted.
+    """
+    from app.embeddings import embed_texts_async
+
+    global _uncertainty_embeddings
+    if _uncertainty_embeddings is None:
+        _uncertainty_embeddings = await embed_texts_async(_UNCERTAINTY_PHRASES)
+
+    text_vec = await embed_texts_async([req.text])
+    max_similarity = max(
+        _cosine_similarity(text_vec[0], phrase_vec)
+        for phrase_vec in _uncertainty_embeddings
+    )
+    confident = max_similarity < req.threshold
+    return {"confident": confident, "score": round(1.0 - max_similarity, 4)}
+
+
+# ---------------------------------------------------------------------------
+# LangGraph agent endpoints — NOT YET IMPLEMENTED (501)
+# ---------------------------------------------------------------------------
 
 
 @app.post("/agent/chat")
 async def agent_chat_endpoint(req: AgentChatRequest):
-    """Run the LangGraph agent for a single turn.
-
-    Stores the exchange in conversation_messages and checkpoints agent state.
-    Returns the assistant response with any tool calls made.
-    """
-    if not _AGENT_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Agent not available")
-    try:
-        result = await run_agent(
-            user_message=req.message,
-            thread_id=req.thread_id,
-            user_id=req.user_id,
-        )
-        return result
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
+    return JSONResponse(
+        status_code=501,
+        content={"detail": "LangGraph agent not yet implemented"},
+    )
 
 
 @app.get("/agent/threads/{thread_id}")
 async def agent_thread_endpoint(thread_id: str):
-    """Load full conversation history for an agent thread."""
-    if not _AGENT_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Agent not available")
-    messages = await load_thread_history(thread_id)
-    return {"thread_id": thread_id, "messages": messages, "count": len(messages)}
+    return JSONResponse(
+        status_code=501,
+        content={"detail": "LangGraph agent not yet implemented"},
+    )
 
 
 # ---------------------------------------------------------------------------
-# Phase 1: MCP server info
+# MCP server info
 # ---------------------------------------------------------------------------
 
 
 @app.get("/mcp/info")
 def mcp_info_endpoint():
-    """Information about the MCP memory server."""
     return {
         "server_name": "memory-server",
         "version": "0.1.0",
@@ -453,36 +572,14 @@ def mcp_info_endpoint():
 # ---------------------------------------------------------------------------
 
 
-class CreateAgentRequest(BaseModel):
-    name: str
-    human_block: str = ""
-    persona_block: str = ""
-    system_prompt: str | None = None
-
-
-class ArchivalInsertRequest(BaseModel):
-    content: str
-
-
-class ArchivalSearchRequest(BaseModel):
-    query: str
-    limit: int = 10
-
-
-class BlockUpdateRequest(BaseModel):
-    value: str
-
-
 @app.get("/letta/health")
 def letta_health_endpoint():
-    """Check Letta server connectivity."""
     ok = letta_health()
     return {"letta_available": ok}
 
 
 @app.post("/letta/agents")
 def letta_create_agent_endpoint(req: CreateAgentRequest):
-    """Create a new Letta agent with core memory blocks."""
     agent = letta_create_agent(
         name=req.name,
         human_block=req.human_block,
@@ -496,13 +593,11 @@ def letta_create_agent_endpoint(req: CreateAgentRequest):
 
 @app.get("/letta/agents")
 def letta_list_agents_endpoint():
-    """List all Letta agents."""
     return {"agents": letta_list_agents()}
 
 
 @app.get("/letta/agents/{agent_id}")
 def letta_get_agent_endpoint(agent_id: str):
-    """Get agent details by ID."""
     agent = letta_lookup_agent(agent_id)
     if agent is None:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
@@ -511,13 +606,11 @@ def letta_get_agent_endpoint(agent_id: str):
 
 @app.delete("/letta/agents/{agent_id}", status_code=204)
 def letta_delete_agent_endpoint(agent_id: str):
-    """Delete a Letta agent and its memories."""
     letta_delete_agent(agent_id)
 
 
 @app.get("/letta/agents/{agent_id}/memory")
 def letta_get_memory_endpoint(agent_id: str):
-    """Get core memory blocks (human + persona) for an agent."""
     memory = letta_get_core_memory(agent_id)
     if memory is None:
         raise HTTPException(
@@ -528,40 +621,30 @@ def letta_get_memory_endpoint(agent_id: str):
 
 @app.put("/letta/agents/{agent_id}/memory/human")
 def letta_update_human_endpoint(agent_id: str, req: BlockUpdateRequest):
-    """Update the human block of an agent's core memory."""
     result = letta_update_human(agent_id, req.value)
     if result is None:
-        raise HTTPException(
-            status_code=503, detail="Failed to update human memory block"
-        )
+        raise HTTPException(status_code=503, detail="Failed to update human memory block")
     return result
 
 
 @app.put("/letta/agents/{agent_id}/memory/persona")
 def letta_update_persona_endpoint(agent_id: str, req: BlockUpdateRequest):
-    """Update the persona block of an agent's core memory."""
     result = letta_update_persona(agent_id, req.value)
     if result is None:
-        raise HTTPException(
-            status_code=503, detail="Failed to update persona memory block"
-        )
+        raise HTTPException(status_code=503, detail="Failed to update persona memory block")
     return result
 
 
 @app.post("/letta/agents/{agent_id}/archival")
 def letta_insert_archival_endpoint(agent_id: str, req: ArchivalInsertRequest):
-    """Insert a passage into the agent's archival memory."""
     result = letta_insert_archival(agent_id, req.content)
     if result is None:
-        raise HTTPException(
-            status_code=503, detail="Failed to insert archival memory"
-        )
+        raise HTTPException(status_code=503, detail="Failed to insert archival memory")
     return result
 
 
 @app.post("/letta/agents/{agent_id}/archival/search")
 def letta_search_archival_endpoint(agent_id: str, req: ArchivalSearchRequest):
-    """Semantic search over the agent's archival memory."""
     results = letta_search_archival(
         agent_id=agent_id, query=req.query, limit=req.limit
     )
@@ -569,40 +652,13 @@ def letta_search_archival_endpoint(agent_id: str, req: ArchivalSearchRequest):
 
 
 # ---------------------------------------------------------------------------
-# Conversation loop endpoint (SSE streaming)
+# Conversation loop — NOT YET IMPLEMENTED (501)
 # ---------------------------------------------------------------------------
-
-
-class ConversationRequest(BaseModel):
-    user_id: str
-    conversation_id: str
-    message: str
-    history: list[dict] | None = None
-    agent_id: str | None = None
 
 
 @app.post("/conversation")
 async def conversation_endpoint(req: ConversationRequest):
-    """Run the full conversation loop and stream results via SSE.
-
-    Events emitted: context, text, tool_call, done, error.
-    """
-    async def event_stream():
-        async for event in run_conversation_loop(
-            user_id=req.user_id,
-            conversation_id=req.conversation_id,
-            user_message=req.message,
-            history=req.history,
-            agent_id=req.agent_id,
-        ):
-            import json as _json
-            yield f"data: {_json.dumps(event)}\n\n"
-
-    return StreamingResponse(
-        event_stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
+    return JSONResponse(
+        status_code=501,
+        content={"detail": "Conversation loop not yet implemented"},
     )

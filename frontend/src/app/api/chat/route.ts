@@ -1,61 +1,15 @@
 import { NextRequest } from "next/server";
 import { createClaudeStream } from "@/lib/claude/client";
-import { MEMORY_TOOLS } from "@/lib/claude/tools";
-import { storeMemory } from "@/lib/memory/client";
+import {
+  recallConversationMemories,
+  recallMemories,
+  searchSemanticFacts,
+  storeConversationMessage,
+  storeMemory,
+} from "@/lib/memory/client";
 import type Anthropic from "@anthropic-ai/sdk";
 
 export const runtime = "edge";
-
-/** Map of tool names to executor functions. */
-const toolExecutors: Record<
-  string,
-  (args: Record<string, unknown>, req: NextRequest) => Promise<string>
-> = {
-  remember_conversation: async (args, req) => {
-    const userId = req.headers.get("x-user-id") || "default";
-    const conversationId = req.headers.get("x-conversation-id") || "default";
-    const content = args.content as string;
-    const category = (args.category as string) || "general";
-    const memoryId = await storeMemory(userId, conversationId, content);
-    return JSON.stringify({ stored: true, memory_id: memoryId, category });
-  },
-
-  recall_memories: async (args, _req) => {
-    const userId = _req.headers.get("x-user-id") || undefined;
-    const { recallMemories } = await import("@/lib/memory/client");
-    const memories = await recallMemories(
-      args.query as string,
-      userId,
-      (args.top_k as number) || 5,
-    );
-    return JSON.stringify({ memories, count: memories.length });
-  },
-
-  search_knowledge_graph: async (args, _req) => {
-    const { searchGraph } = await import("@/lib/memory/client");
-    const entities = await searchGraph(
-      args.query as string,
-      args.type_filter as string | undefined,
-    );
-    return JSON.stringify({ entities, count: entities.length });
-  },
-
-  store_archival_memory: async (args, _req) => {
-    const memoryApiBase =
-      process.env.MEMORY_API_URL || "http://localhost:8001";
-    const agentId = _req.headers.get("x-agent-id") || "default";
-    const res = await fetch(
-      `${memoryApiBase}/letta/agents/${agentId}/archival`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content: args.content }),
-      },
-    );
-    const ok = res.ok;
-    return JSON.stringify({ stored: ok });
-  },
-};
 
 type ChatRequest = {
   messages: { role: "user" | "assistant"; content: string }[];
@@ -63,6 +17,11 @@ type ChatRequest = {
 
 export async function POST(req: NextRequest) {
   const { messages } = (await req.json()) as ChatRequest;
+  const userId = req.headers.get("x-user-id") || "default";
+  const conversationId = req.headers.get("x-conversation-id") || "default";
+  const latestUserMessage = [...messages]
+    .reverse()
+    .find((message) => message.role === "user")?.content;
 
   const encoder = new TextEncoder();
   let aborted = false;
@@ -81,104 +40,96 @@ export async function POST(req: NextRequest) {
       };
 
       try {
-        const anthropicMessages: Anthropic.MessageParam[] = [];
-        for (const msg of messages) {
-          anthropicMessages.push({ role: msg.role, content: msg.content });
+        let memoryContext = "";
+
+        if (latestUserMessage) {
+          try {
+            // Recall episodic + conversation memories and stored identity facts in parallel.
+            const [episodicMemories, conversationMemories, identityFacts] =
+              await Promise.all([
+                recallMemories(latestUserMessage, userId, 8),
+                recallConversationMemories(latestUserMessage, userId, 8),
+                searchSemanticFacts("user name assistant name", userId, 4, 0.55),
+              ]);
+
+            const allMemories = [...episodicMemories, ...conversationMemories];
+
+            if (identityFacts.length > 0) {
+              memoryContext = identityFacts
+                .map((f) => f.content)
+                .join("\n");
+            }
+
+            if (allMemories.length > 0) {
+              const episodicContext = allMemories
+                .map(
+                  (memory, index) =>
+                    `Memory ${index + 1} (similarity ${memory.similarity}): ${memory.content}`,
+                )
+                .join("\n");
+              memoryContext = memoryContext
+                ? `${memoryContext}\n${episodicContext}`
+                : episodicContext;
+            }
+          } catch (error) {
+            console.error("[chat] silent memory recall failed", error);
+          }
         }
 
-        // Tool-use loop
-        let maxRounds = 5;
+        const anthropicMessages: Anthropic.MessageParam[] = messages.map(
+          (msg) => ({ role: msg.role, content: msg.content }),
+        );
+
         let finalText = "";
 
-        while (maxRounds-- > 0 && !aborted) {
-          const response = createClaudeStream(
-            anthropicMessages,
-            MEMORY_TOOLS,
-            req.signal,
-          );
-          let currentBlock: Anthropic.TextBlock | Anthropic.ToolUseBlock | null = null;
-          const toolRequests: Anthropic.ToolUseBlock[] = [];
+        if (latestUserMessage) {
+          void storeConversationMessage(
+            conversationId,
+            "user",
+            latestUserMessage,
+            userId,
+          ).catch((error) => {
+            console.error("[chat] conversation message store failed", error);
+          });
+        }
 
-          for await (const event of await response) {
-            if (
-              event.type === "content_block_start" &&
-              event.content_block.type === "text"
-            ) {
-              currentBlock = event.content_block;
-            }
+        const response = createClaudeStream(anthropicMessages, req.signal, memoryContext);
 
-            if (
-              event.type === "content_block_start" &&
-              event.content_block.type === "tool_use"
-            ) {
-              currentBlock = event.content_block;
-              toolRequests.push(event.content_block);
-            }
-
-            if (
-              event.type === "content_block_delta" &&
-              event.delta.type === "text_delta"
-            ) {
-              enqueue({ event: "text", content: event.delta.text });
-            }
-
-            if (
-              event.type === "content_block_delta" &&
-              event.delta.type === "input_json_delta"
-            ) {
-              // Tool input accumulates — we'll send at tool execution
-            }
-          }
-
-          // After the stream completes, check the message stop reason
-          // by checking if any tool_use blocks were accumulated
-          if (toolRequests.length > 0) {
-            // Add assistant message with tool_use blocks
-            const assistantContent: Anthropic.ContentBlock[] = toolRequests.map(
-              (tr) => ({
-                type: "tool_use" as const,
-                id: tr.id,
-                name: tr.name,
-                input: tr.input,
-              }),
-            );
-            anthropicMessages.push({
-              role: "assistant",
-              content: assistantContent,
-            });
-
-            // Execute tools and add results
-            const toolResults: Anthropic.ToolResultBlockParam[] = [];
-            for (const tr of toolRequests) {
-              enqueue({
-                event: "tool_call",
-                name: tr.name,
-                input: tr.input,
-              });
-
-              const executor = toolExecutors[tr.name];
-              const result = executor
-                ? await executor(tr.input as Record<string, unknown>, req)
-                : JSON.stringify({ error: `Unknown tool: ${tr.name}` });
-
-              toolResults.push({
-                type: "tool_result",
-                tool_use_id: tr.id,
-                content: result,
-              });
-            }
-
-            anthropicMessages.push({
-              role: "user",
-              content: toolResults,
-            });
-          } else {
-            // No tool calls — we're done
-            break;
+        for await (const event of await response) {
+          if (
+            event.type === "content_block_delta" &&
+            event.delta.type === "text_delta"
+          ) {
+            finalText += event.delta.text;
+            enqueue({ event: "text", content: event.delta.text });
           }
         }
 
+        const finalReply = finalText.trim();
+
+        // Sinaliza o fim ao cliente IMEDIATAMENTE — o botão reabilita assim que
+        // o texto termina, sem esperar a persistência (que inclui extração de
+        // entidades via LLM e leva segundos). A memória é salva em segundo
+        // plano, igual à mensagem do usuário acima.
         enqueue({ event: "done", text: finalText });
+
+        if (latestUserMessage && finalReply) {
+          void storeConversationMessage(
+            conversationId,
+            "assistant",
+            finalReply,
+            userId,
+          ).catch((error) => {
+            console.error("[chat] assistant message store failed", error);
+          });
+          void storeMemory(
+            userId,
+            conversationId,
+            `User: ${latestUserMessage}\nAssistant: ${finalReply}`,
+          ).catch((error) => {
+            console.error("[chat] memory store failed", error);
+          });
+        }
       } catch (err) {
         enqueue({
           event: "error",

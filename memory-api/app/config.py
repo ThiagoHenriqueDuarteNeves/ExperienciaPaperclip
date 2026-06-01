@@ -6,7 +6,7 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     chromadb_host: str = "chromadb"
     chromadb_port: int = 8000
-    embedding_model: str = "all-MiniLM-L6-v2"
+    embedding_model: str = "intfloat/multilingual-e5-large"
     collection_name: str = "episodic_memories"
     similarity_top_k: int = 5
     min_similarity_threshold: float = 0.65
@@ -33,15 +33,17 @@ class Settings(BaseSettings):
     pgvector_min_pool: int = 2
     pgvector_max_pool: int = 10
 
-    # Embedding Configuration
-    # Set MEMORY_EMBEDDING_API_BASE + MEMORY_EMBEDDING_API_KEY to use an external API.
-    # When empty and provider is 'deepseek', defaults to Deepseek's embedding API.
-    # When empty and provider is 'anthropic', falls back to local SentenceTransformer model.
+    # Embedding Configuration — local model (intfloat/multilingual-e5-large, 1024-dim).
+    # Supports API override: set MEMORY_EMBEDDING_API_BASE + MEMORY_EMBEDDING_API_KEY
+    # to use OpenAI or another compat provider instead.
+    # Changing between local↔API requires recreating the schema if dimensions differ:
+    #   docker compose down -v && docker compose up
     embedding_api_key: str = ""
     embedding_api_base: str = ""
     embedding_api_model: str = "text-embedding-3-large"
+    embedding_dimensions: int = 1024
 
-    # Deepseek-specific key (used for embeddings when provider is 'deepseek')
+    # Deepseek key (LLM only — not used for embeddings)
     deepseek_api_key: str = ""
 
     letta_base_url: str = "http://letta:8283"
@@ -64,31 +66,15 @@ class Settings(BaseSettings):
 
     @property
     def effective_embedding_api_base(self) -> str:
-        """Get the effective embedding API base URL based on the provider.
-
-        - If explicitly set via MEMORY_EMBEDDING_API_BASE, use it.
-        - If provider is 'deepseek', use Deepseek's embedding endpoint.
-        - If provider is 'anthropic', return empty (use local model).
+        """Embedding base URL — must be set explicitly via MEMORY_EMBEDDING_API_BASE.
+        Deepseek does not offer an embeddings API; use OpenAI or another provider.
         """
-        if self.embedding_api_base:
-            return self.embedding_api_base
-        if self.llm_provider == "deepseek":
-            return "https://api.deepseek.com/v1"
-        return ""
+        return self.embedding_api_base
 
     @property
     def effective_embedding_api_key(self) -> str:
-        """Get the effective embedding API key based on the provider.
-
-        - If explicitly set via MEMORY_EMBEDDING_API_KEY, use it.
-        - If provider is 'deepseek', use the Deepseek API key.
-        - If provider is 'anthropic', return empty (use local model).
-        """
-        if self.embedding_api_key:
-            return self.embedding_api_key
-        if self.llm_provider == "deepseek":
-            return self.deepseek_api_key or os.environ.get("DEEPSEEK_API_KEY", "")
-        return ""
+        """Embedding API key — reads MEMORY_EMBEDDING_API_KEY explicitly."""
+        return self.embedding_api_key
 
     model_config = {"env_prefix": "MEMORY_"}
 

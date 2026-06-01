@@ -1,8 +1,11 @@
+import logging
 import uuid
 
 from app.chroma_client import get_or_create_collection
 from app.config import settings
 from app.embeddings import embed_text
+
+logger = logging.getLogger(__name__)
 try:
     from app.kg_retrieval import store_knowledge
     _KG_AVAILABLE = True
@@ -40,7 +43,9 @@ def store_conversation(
         try:
             store_knowledge(text=content, source_id=memory_id)
         except Exception:
-            pass  # KG extraction is best-effort
+            logger.warning(
+                "KG extraction failed for memory_id=%s", memory_id, exc_info=True
+            )
 
     return memory_id
 
@@ -50,7 +55,7 @@ def retrieve_similar(
     user_id: str | None = None,
     top_k: int | None = None,
 ) -> list[dict]:
-    embedding = embed_text(query)
+    embedding = embed_text(query, is_query=True)
     collection = get_or_create_collection()
 
     where = None

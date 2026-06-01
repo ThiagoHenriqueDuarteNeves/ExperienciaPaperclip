@@ -8,6 +8,13 @@ export interface MemorySearchResult {
   similarity: number;
 }
 
+export interface ConversationMemoryResult {
+  id: string;
+  content: string;
+  metadata: Record<string, unknown>;
+  similarity: number;
+}
+
 export interface GraphEntity {
   name: string;
   type: string;
@@ -62,6 +69,81 @@ export async function recallMemories(
   if (!res.ok) throw new Error(`Retrieve failed: ${res.status}`);
   const data = await res.json();
   return data.memories;
+}
+
+/** Search conversation memory in pgvector. */
+export async function recallConversationMemories(
+  query: string,
+  userId?: string,
+  topK?: number,
+): Promise<ConversationMemoryResult[]> {
+  const res = await fetch(`${MEMORY_API_BASE}/memory/search`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query, user_id: userId, top_k: topK }),
+  });
+  if (!res.ok) throw new Error(`Conversation memory search failed: ${res.status}`);
+  const data = await res.json();
+  return data.results || [];
+}
+
+/** Store a conversation message in pgvector. */
+export async function storeConversationMessage(
+  threadId: string,
+  role: "user" | "assistant" | "system",
+  content: string,
+  userId: string,
+): Promise<string> {
+  const res = await fetch(`${MEMORY_API_BASE}/memory/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      thread_id: threadId,
+      role,
+      content,
+      metadata: { user_id: userId, source: "chat" },
+    }),
+  });
+  if (!res.ok) throw new Error(`Conversation message store failed: ${res.status}`);
+  const data = await res.json();
+  return data.message_id;
+}
+
+/** Search semantic memory facts (e.g. user name, preferences). */
+export async function searchSemanticFacts(
+  query: string,
+  userId?: string,
+  topK = 3,
+  minSimilarity = 0.6,
+): Promise<MemorySearchResult[]> {
+  const res = await fetch(`${MEMORY_API_BASE}/memory/semantic/search`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      query,
+      user_id: userId,
+      top_k: topK,
+      min_similarity: minSimilarity,
+    }),
+  });
+  if (!res.ok) throw new Error(`Semantic search failed: ${res.status}`);
+  const data = await res.json();
+  return data.results || [];
+}
+
+/** Check whether an assistant response is confident enough to be stored. */
+export async function checkResponseConfidence(
+  text: string,
+  threshold = 0.72,
+): Promise<boolean> {
+  const res = await fetch(`${MEMORY_API_BASE}/memory/confidence`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text, threshold }),
+  });
+  if (!res.ok) return true; // fail open: persist on error
+  const data = await res.json();
+  return data.confident as boolean;
 }
 
 /** Search the knowledge graph. */

@@ -42,7 +42,7 @@ async def search_semantic_memories(
     min_similarity: float = 0.5,
 ) -> list[dict]:
     """Semantic search over stored facts. Embedding is computed automatically."""
-    embedding = await embed_text_async(query)
+    embedding = await embed_text_async(query, is_query=True)
     return await _search_semantic(
         embedding=embedding,
         user_id=user_id,

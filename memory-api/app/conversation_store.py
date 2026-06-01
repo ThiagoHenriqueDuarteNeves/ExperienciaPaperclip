@@ -43,7 +43,7 @@ async def search_similar(
     min_similarity: float = 0.65,
 ) -> list[dict]:
     """ANN similarity search. Embedding is computed automatically from query text."""
-    embedding = await embed_text_async(query)
+    embedding = await embed_text_async(query, is_query=True)
     return await _search_similar(
         embedding=embedding,
         user_id=user_id,

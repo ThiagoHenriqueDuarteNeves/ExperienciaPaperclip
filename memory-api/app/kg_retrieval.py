@@ -57,7 +57,7 @@ def augment_with_graph_context(
     For each retrieved memory, finds related entities in Neo4j and attaches
     the graph neighborhood as context.
     """
-    embedding = embed_text(query)
+    embedding = embed_text(query, is_query=True)
     collection = get_or_create_collection()
 
     where = None

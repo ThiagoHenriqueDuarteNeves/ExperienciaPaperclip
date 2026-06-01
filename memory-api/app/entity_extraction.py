@@ -1,10 +1,13 @@
 """Entity and relationship extraction using Claude API."""
 
 import json
+import logging
 
 import httpx
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 EXTRACTION_PROMPT = """You are a knowledge graph extraction system. Analyze the given conversation text and extract:
 
@@ -34,16 +37,23 @@ If nothing meaningful can be extracted, return {"entities": [], "relationships":
 """
 
 
+class ExtractionError(Exception):
+    """Raised when Claude returns an unusable extraction response."""
+
+
 def extract_knowledge(text: str) -> dict:
     """Extract entities and relationships from text using Claude."""
     api_key = settings.effective_claude_api_key
     if not api_key:
+        logger.warning("entity_extraction: no API key configured, skipping extraction")
         return {"entities": [], "relationships": []}
+
+    api_base = settings.effective_llm_api_base.rstrip("/")
 
     for attempt in range(settings.max_extraction_retries + 1):
         try:
             resp = httpx.post(
-                "https://api.anthropic.com/v1/messages",
+                f"{api_base}/messages",
                 headers={
                     "x-api-key": api_key,
                     "anthropic-version": "2023-06-01",
@@ -61,20 +71,52 @@ def extract_knowledge(text: str) -> dict:
             resp.raise_for_status()
             data = resp.json()
 
+            stop_reason = data.get("stop_reason")
+            if stop_reason == "max_tokens":
+                raise ExtractionError("Response truncated (max_tokens reached)")
+            if stop_reason == "error" or "error" in data:
+                raise ExtractionError(f"Claude returned an error response: {data.get('error')}")
+
             block = data["content"][0]
             content_text = block.get("text", block.get("input", {}).get("text", ""))
 
-            # Parse the JSON response from Claude
             return _parse_extraction(content_text)
 
-        except (httpx.HTTPStatusError, httpx.TimeoutException, json.JSONDecodeError, KeyError):
+        except ExtractionError as exc:
+            logger.warning(
+                "entity_extraction: attempt %d/%d failed — %s",
+                attempt + 1,
+                settings.max_extraction_retries + 1,
+                exc,
+            )
             if attempt >= settings.max_extraction_retries:
                 return {"entities": [], "relationships": []}
+
+        except (httpx.HTTPStatusError, httpx.TimeoutException) as exc:
+            logger.warning(
+                "entity_extraction: attempt %d/%d — HTTP error: %s",
+                attempt + 1,
+                settings.max_extraction_retries + 1,
+                exc,
+            )
+            if attempt >= settings.max_extraction_retries:
+                return {"entities": [], "relationships": []}
+
+        except (json.JSONDecodeError, KeyError) as exc:
+            logger.warning(
+                "entity_extraction: attempt %d/%d — parse error: %s",
+                attempt + 1,
+                settings.max_extraction_retries + 1,
+                exc,
+            )
+            if attempt >= settings.max_extraction_retries:
+                return {"entities": [], "relationships": []}
+
+    return {"entities": [], "relationships": []}
 
 
 def _parse_extraction(text: str) -> dict:
     """Parse Claude's response into entities and relationships lists."""
-    # Strip markdown code fences if present
     text = text.strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[-1]
@@ -87,7 +129,6 @@ def _parse_extraction(text: str) -> dict:
     entities = result.get("entities", [])
     relationships = result.get("relationships", [])
 
-    # Validate and normalize
     validated_entities = []
     for e in entities:
         if isinstance(e, dict) and e.get("name") and e.get("type"):

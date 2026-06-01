@@ -75,7 +75,7 @@ async def search_memories(
     from app.pgvector_client import search_similar
     from app.embeddings import embed_text_async
 
-    embedding = await embed_text_async(query)
+    embedding = await embed_text_async(query, is_query=True)
     results = await search_similar(
         embedding=embedding,
         user_id=user_id or None,
