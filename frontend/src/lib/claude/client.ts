@@ -1,20 +1,22 @@
 import Anthropic from "@anthropic-ai/sdk";
 
-// Support both Anthropic and Deepseek (Deepseek provides Anthropic-compatible API)
-const getAnthropicClient = () => {
+// Support both Anthropic and Deepseek (Deepseek provides Anthropic-compatible API).
+// Lazy singleton — NOT instantiated at module level so that the build succeeds
+// even when ANTHROPIC_API_KEY is absent (e.g. Vercel build environment).
+let _anthropic: Anthropic | null = null;
+
+function getAnthropicClient(): Anthropic {
+  if (_anthropic) return _anthropic;
   const apiKey = process.env.CLAUDE_API_KEY || process.env.ANTHROPIC_API_KEY || "";
   const provider = process.env.LLM_PROVIDER || "anthropic";
-  const baseURL = provider === "deepseek" 
-    ? "https://api.deepseek.com/anthropic"
-    : process.env.ANTHROPIC_BASE_URL || undefined;
+  const baseURL =
+    provider === "deepseek"
+      ? "https://api.deepseek.com/anthropic"
+      : process.env.ANTHROPIC_BASE_URL || undefined;
 
-  return new Anthropic({
-    apiKey,
-    ...(baseURL && { baseURL }),
-  });
-};
-
-const anthropic = getAnthropicClient();
+  _anthropic = new Anthropic({ apiKey, ...(baseURL && { baseURL }) });
+  return _anthropic;
+}
 
 /** Shared system prompt — cached across requests via ephemeral breakpoint. */
 const SYSTEM_PROMPT = `You are a warm, human-like conversational assistant with persistent memory across conversations.
@@ -64,7 +66,7 @@ export async function createClaudeStream(
     });
   }
 
-  return anthropic.messages.stream(
+  return getAnthropicClient().messages.stream(
     {
       model: process.env.CLAUDE_MODEL || "claude-sonnet-4-20250506",
       max_tokens: 4096,

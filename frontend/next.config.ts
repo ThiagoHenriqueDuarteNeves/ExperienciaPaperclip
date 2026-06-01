@@ -10,6 +10,10 @@ const nextConfig: NextConfig = {
   // página renderiza mas NUNCA hidrata — botões e inputs ficam "mortos".
   // (usado apenas em `next dev`; ignorado em produção)
   allowedDevOrigins: ["192.168.1.15", "192.168.1.6"],
+
+  // Fixa a raiz do Turbopack neste diretório (frontend/) para evitar o aviso
+  // de "multiple lockfiles" quando há um package-lock.json na raiz do repo.
+  turbopack: { root: __dirname },
 };
 
 export default nextConfig;
