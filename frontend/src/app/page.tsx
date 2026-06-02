@@ -4,7 +4,6 @@ import { useState, useRef, useEffect, useCallback } from "react";
 
 const CHAT_USER_ID = "default-user";
 const BUILD_TAG = "v12";
-const CHAT_URL = process.env.NEXT_PUBLIC_CHAT_API_URL ?? "/api/chat";
 
 /**
  * Gera um UUID. crypto.randomUUID() só existe em contexto seguro
@@ -181,13 +180,12 @@ export default function Home() {
 
     try {
       const conversationId = getConversationId();
-      const res = await fetch(CHAT_URL, {
+      const res = await fetch("/api/chat", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "x-user-id": CHAT_USER_ID,
           "x-conversation-id": conversationId,
-          skip_zrok_interstitial: "true",
         },
         body: JSON.stringify({ messages: newMessages }),
         signal: controller.signal,
