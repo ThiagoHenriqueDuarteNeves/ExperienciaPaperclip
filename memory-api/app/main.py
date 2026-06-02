@@ -1,7 +1,11 @@
+import asyncio
+import json
 import logging
 import math
 
+import httpx
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -142,6 +146,14 @@ limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(title="Episodic, Semantic & Procedural Memory API", version="0.4.0-phase1")
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 
 # ---------------------------------------------------------------------------
@@ -661,4 +673,181 @@ async def conversation_endpoint(req: ConversationRequest):
     return JSONResponse(
         status_code=501,
         content={"detail": "Conversation loop not yet implemented"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Chat endpoint — full pipeline: recall → LLM stream → persist
+# ---------------------------------------------------------------------------
+
+_CHAT_SYSTEM_PROMPT = """You are a warm, human-like conversational assistant with persistent memory across conversations.
+
+## How your memory works
+Relevant records from past conversations are retrieved automatically and given to you in a system section titled "Retrieved memories" — when relevant memory exists, it is ALREADY provided to you. You do not call any tool to fetch it.
+
+## Grounding and honesty — CRITICAL, follow strictly
+- The "Retrieved memories" section together with the current conversation are your ONLY sources of truth about the user, past events, names, stories, dates and facts.
+- Reproduce facts, names, dates, events and stories EXACTLY as they appear in memory. Never alter, embellish, dramatize, summarize away or contradict them. If memory records a story, retell that exact story — do not "improve" or reinvent it.
+- If the information needed to answer is NOT in the retrieved memories or in the current conversation, say plainly that you do not have it recorded, or ask the user. NEVER invent, guess, or fill in missing details and present them as real.
+- A short, honest "I don't have that recorded" is always better than a confident answer that might be wrong.
+- If a memory conflicts with your own assumptions, the memory always wins.
+- Never claim something happened, or describe events, unless it is supported by memory or the conversation.
+
+## Style
+- Natural, conversational tone. Reply in the same language the user is using (Portuguese by default).
+- Be concise unless the user asks for detail."""
+
+
+@app.post("/api/chat")
+@limiter.limit("20/minute")
+async def api_chat_endpoint(request: Request):
+    """Full chat pipeline: recall memories, stream LLM response, persist turn."""
+    from app.config import settings
+
+    body = await request.json()
+    messages = body.get("messages", [])
+    user_id = request.headers.get("x-user-id", "default-user")
+    conversation_id = request.headers.get("x-conversation-id", "default")
+
+    latest_user_message: str | None = next(
+        (m["content"] for m in reversed(messages) if m.get("role") == "user"),
+        None,
+    )
+
+    async def generate():
+        final_text = ""
+        try:
+            # 1. Recall memories in parallel
+            memory_context = ""
+            if latest_user_message:
+                try:
+                    episodic, convo, identity = await asyncio.gather(
+                        asyncio.to_thread(retrieve_similar, latest_user_message, user_id, 8),
+                        search_conversations(query=latest_user_message, top_k=8, user_id=user_id),
+                        search_semantic_memories(
+                            query="user name assistant name",
+                            user_id=user_id,
+                            top_k=4,
+                            min_similarity=0.55,
+                        ),
+                    )
+                    parts = []
+                    if identity:
+                        parts.append("\n".join(f.get("content", "") for f in identity))
+                    all_mems = [*episodic, *convo]
+                    if all_mems:
+                        parts.append(
+                            "\n".join(
+                                f"Memory {i + 1} (similarity {m.get('similarity', 0):.2f}): {m.get('content', '')}"
+                                for i, m in enumerate(all_mems)
+                            )
+                        )
+                    memory_context = "\n".join(parts)
+                except Exception as mem_err:
+                    logger.warning("chat: memory recall failed: %s", mem_err)
+
+            # 2. Build system array
+            system: list[dict] = [{"type": "text", "text": _CHAT_SYSTEM_PROMPT}]
+            if memory_context:
+                system.append({
+                    "type": "text",
+                    "text": (
+                        "## Retrieved memories (AUTHORITATIVE — your only record of the past)\n"
+                        "These are real records from previous conversations with this user. "
+                        "Treat them as ground truth. Answer using ONLY these records plus the "
+                        "current conversation. Reproduce any story or detail faithfully — do not "
+                        "alter or invent anything. If the answer is not here, say you do not have "
+                        "it recorded instead of guessing.\n\n" + memory_context
+                    ),
+                })
+
+            # 3. Fire-and-forget: store user message
+            if latest_user_message:
+                asyncio.create_task(
+                    store_message(
+                        thread_id=conversation_id,
+                        role="user",
+                        content=latest_user_message,
+                        metadata={"user_id": user_id},
+                    )
+                )
+
+            # 4. Stream from LLM (Anthropic-compatible API)
+            api_key = settings.effective_claude_api_key
+            api_base = settings.effective_llm_api_base.rstrip("/")
+
+            async with httpx.AsyncClient(timeout=120) as client:
+                async with client.stream(
+                    "POST",
+                    f"{api_base}/messages",
+                    headers={
+                        "x-api-key": api_key,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": settings.claude_model,
+                        "max_tokens": 4096,
+                        "system": system,
+                        "messages": [{"role": m["role"], "content": m["content"]} for m in messages],
+                        "stream": True,
+                    },
+                ) as resp:
+                    resp.raise_for_status()
+                    async for line in resp.aiter_lines():
+                        if not line.startswith("data: "):
+                            continue
+                        raw = line[6:]
+                        if raw == "[DONE]":
+                            break
+                        try:
+                            ev = json.loads(raw)
+                        except json.JSONDecodeError:
+                            continue
+                        if ev.get("type") == "content_block_delta":
+                            delta = ev.get("delta", {})
+                            if delta.get("type") == "text_delta":
+                                chunk = delta.get("text", "")
+                                final_text += chunk
+                                yield f"data: {json.dumps({'event': 'text', 'content': chunk})}\n\n"
+                        elif ev.get("type") == "message_stop":
+                            break
+
+            yield f"data: {json.dumps({'event': 'done', 'text': final_text})}\n\n"
+
+            # 5. Fire-and-forget: persist assistant reply
+            final_reply = final_text.strip()
+            if latest_user_message and final_reply:
+                async def _persist():
+                    try:
+                        await store_message(
+                            thread_id=conversation_id,
+                            role="assistant",
+                            content=final_reply,
+                            metadata={"user_id": user_id},
+                        )
+                    except Exception as e:
+                        logger.warning("chat: store assistant msg failed: %s", e)
+                    try:
+                        await asyncio.to_thread(
+                            store_conversation,
+                            user_id=user_id,
+                            conversation_id=conversation_id,
+                            content=f"User: {latest_user_message}\nAssistant: {final_reply}",
+                            metadata={"source": "chat"},
+                            extract_knowledge_graph=True,
+                        )
+                    except Exception as e:
+                        logger.warning("chat: episodic store failed: %s", e)
+
+                asyncio.create_task(_persist())
+
+        except Exception as exc:
+            logger.exception("chat endpoint error")
+            yield f"data: {json.dumps({'event': 'error', 'message': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
