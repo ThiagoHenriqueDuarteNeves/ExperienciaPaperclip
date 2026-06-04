@@ -54,6 +54,15 @@ except ImportError:
     def extract_aurora(*args, **kwargs) -> dict | None:
         return None
 
+# Phase 4: multi-user auth
+from app.auth import (
+    hash_pin,
+    issue_token,
+    user_from_authorization,
+    verify_pin,
+)
+from app.pgvector_client import create_user_profile, get_user_profile
+
 configure_logging()
 logger = logging.getLogger(__name__)
 
@@ -287,6 +296,17 @@ class AuroraSearchRequest(BaseModel):
     query: str = Field(..., max_length=2_000)
     user_id: str | None = Field(default=None, max_length=256)
     top_k: int = Field(default=5, ge=1, le=50)
+
+
+class RegisterRequest(BaseModel):
+    user_id: str = Field(..., min_length=1, max_length=64, pattern="^[a-z0-9_-]+$")
+    pin: str = Field(..., min_length=4, max_length=32)
+    display_name: str = Field(default="", max_length=128)
+
+
+class LoginRequest(BaseModel):
+    user_id: str = Field(..., min_length=1, max_length=64, pattern="^[a-z0-9_-]+$")
+    pin: str = Field(..., min_length=4, max_length=32)
 
 
 class AgentChatRequest(BaseModel):
@@ -779,6 +799,51 @@ async def conversation_endpoint(req: ConversationRequest):
 
 
 # ---------------------------------------------------------------------------
+# Auth — multi-user profiles with server-validated PIN
+# ---------------------------------------------------------------------------
+
+
+@app.post("/auth/register")
+@limiter.limit("5/minute")
+async def auth_register_endpoint(request: Request, req: RegisterRequest):
+    existing = await get_user_profile(req.user_id)
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="user_id already taken")
+    pin_hash, pin_salt = hash_pin(req.pin)
+    display_name = req.display_name or req.user_id
+    await create_user_profile(req.user_id, display_name, pin_hash, pin_salt)
+    logger.info("auth: registered user_id=%s", req.user_id)
+    token = issue_token(req.user_id)
+    return {"token": token, "user_id": req.user_id, "display_name": display_name}
+
+
+@app.post("/auth/login")
+@limiter.limit("6/minute")
+async def auth_login_endpoint(request: Request, req: LoginRequest):
+    profile = await get_user_profile(req.user_id)
+    if profile is None or not verify_pin(req.pin, profile["pin_hash"], profile["pin_salt"]):
+        raise HTTPException(status_code=401, detail="invalid credentials")
+    token = issue_token(req.user_id)
+    return {
+        "token": token,
+        "user_id": req.user_id,
+        "display_name": profile.get("display_name") or req.user_id,
+    }
+
+
+@app.get("/auth/me")
+async def auth_me_endpoint(request: Request):
+    user_id = user_from_authorization(request.headers.get("authorization"))
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="invalid or missing token")
+    profile = await get_user_profile(user_id)
+    return {
+        "user_id": user_id,
+        "display_name": (profile or {}).get("display_name") or user_id,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Chat endpoint — full pipeline: recall → LLM stream → persist
 # ---------------------------------------------------------------------------
 
@@ -808,7 +873,12 @@ async def api_chat_endpoint(request: Request):
 
     body = await request.json()
     messages = body.get("messages", [])
-    user_id = request.headers.get("x-user-id", "default-user")
+    # Authenticated multi-user: user_id is derived from the signed token, not a
+    # trusted header — this is what actually protects one user's memories from
+    # another. No token → 401 (no x-user-id fallback, by design).
+    user_id = user_from_authorization(request.headers.get("authorization"))
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
     conversation_id = request.headers.get("x-conversation-id", "default")
 
     latest_user_message: str | None = next(

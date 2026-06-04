@@ -1,9 +1,10 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
+import ProfileGate from "../components/ProfileGate";
+import { clearSession, getSession, type Session } from "../lib/auth";
 
-const CHAT_USER_ID = "default-user";
-const BUILD_TAG = "v12";
+const BUILD_TAG = "v13";
 const CHAT_URL = process.env.NEXT_PUBLIC_CHAT_API_URL ?? "/api/chat";
 
 /**
@@ -45,9 +46,13 @@ function parseSSEBuffer(raw: string): string {
   return text;
 }
 
-function getConversationId(): string {
+function convKey(userId: string): string {
+  return `memory-chat-conversation-id:${userId}`;
+}
+
+function getConversationId(userId: string): string {
   if (typeof window === "undefined") return "default-conversation";
-  const key = "memory-chat-conversation-id";
+  const key = convKey(userId);
   try {
     const existing = window.localStorage.getItem(key);
     if (existing) return existing;
@@ -59,8 +64,8 @@ function getConversationId(): string {
   }
 }
 
-function clearConversationId(): void {
-  try { window.localStorage.removeItem("memory-chat-conversation-id"); } catch { /* ignore */ }
+function clearConversationId(userId: string): void {
+  try { window.localStorage.removeItem(convKey(userId)); } catch { /* ignore */ }
 }
 
 interface ChatMessage {
@@ -122,12 +127,23 @@ export default function Home() {
   const [hasText, setHasText] = useState(false);   // cosmético: cor do botão
   const [streaming, setStreaming] = useState(false);
   const [streamingText, setStreamingText] = useState("");
+  const [session, setSession] = useState<Session | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
 
   const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const streamingRef = useRef(false);
   const messagesRef = useRef<ChatMessage[]>([]);
+  const sessionRef = useRef<Session | null>(null);
+
+  // Load any persisted session on mount (localStorage is client-only).
+  useEffect(() => {
+    setSession(getSession());
+    setAuthChecked(true);
+  }, []);
+
+  useEffect(() => { sessionRef.current = session; }, [session]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -163,6 +179,9 @@ export default function Home() {
     const text = readText();
     if (!text || streamingRef.current) return;
 
+    const sess = sessionRef.current;
+    if (!sess) return;
+
     const userMessage: ChatMessage = { role: "user", content: text };
     const newMessages = [...messagesRef.current, userMessage];
     messagesRef.current = newMessages;
@@ -180,12 +199,12 @@ export default function Home() {
     let errorMsg = "";
 
     try {
-      const conversationId = getConversationId();
+      const conversationId = getConversationId(sess.userId);
       const res = await fetch(CHAT_URL, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-user-id": CHAT_USER_ID,
+          Authorization: `Bearer ${sess.token}`,
           "x-conversation-id": conversationId,
           skip_zrok_interstitial: "true",
         },
@@ -193,6 +212,12 @@ export default function Home() {
         signal: controller.signal,
       });
 
+      if (res.status === 401) {
+        // Token expired/invalid — drop session and show the gate again.
+        clearSession();
+        setSession(null);
+        return;
+      }
       if (!res.ok) {
         errorMsg = `HTTP ${res.status} ${res.statusText}`;
       } else if (!res.body || typeof res.body.getReader !== "function") {
@@ -254,11 +279,27 @@ export default function Home() {
 
   function handleNewConversation() {
     if (streamingRef.current) abortRef.current?.abort();
-    clearConversationId();
+    if (session) clearConversationId(session.userId);
     messagesRef.current = [];
     setMessages([]);
     setStreamingText("");
     clearTextarea();
+  }
+
+  function handleLogout() {
+    if (streamingRef.current) abortRef.current?.abort();
+    clearSession();
+    messagesRef.current = [];
+    setMessages([]);
+    setStreamingText("");
+    clearTextarea();
+    setSession(null); // keeps the profile list — only ends the session
+  }
+
+  // Auth gate: wait for the localStorage check, then require a session.
+  if (!authChecked) return null;
+  if (!session) {
+    return <ProfileGate onAuthenticated={(s) => { setSession(s); }} />;
   }
 
   const isEmpty = messages.length === 0 && !streamingText;
@@ -283,25 +324,46 @@ export default function Home() {
             <div style={{ fontWeight: 700, fontSize: 16, lineHeight: 1.2 }}>
               Memory Chat <span style={{ fontSize: 10, fontWeight: 400, color: "var(--btn-primary)" }}>{BUILD_TAG}</span>
             </div>
-            <div style={{ fontSize: 11, color: "var(--text-muted)" }}>Memória persistente entre conversas</div>
+            <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
+              👤 {session.displayName}
+            </div>
           </div>
         </div>
-        <button
-          type="button"
-          onClick={handleNewConversation}
-          style={{
-            padding: "6px 12px", borderRadius: 8,
-            border: "1px solid var(--border)", background: "transparent",
-            color: "var(--text-muted)", fontSize: 12,
-            display: "flex", alignItems: "center", gap: 5,
-            cursor: "pointer",
-            touchAction: "manipulation",
-            WebkitTapHighlightColor: "transparent",
-            userSelect: "none",
-          } as React.CSSProperties}
-        >
-          ✏️ Nova conversa
-        </button>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <button
+            type="button"
+            onClick={handleNewConversation}
+            style={{
+              padding: "6px 12px", borderRadius: 8,
+              border: "1px solid var(--border)", background: "transparent",
+              color: "var(--text-muted)", fontSize: 12,
+              display: "flex", alignItems: "center", gap: 5,
+              cursor: "pointer",
+              touchAction: "manipulation",
+              WebkitTapHighlightColor: "transparent",
+              userSelect: "none",
+            } as React.CSSProperties}
+          >
+            ✏️ Nova conversa
+          </button>
+          <button
+            type="button"
+            onClick={handleLogout}
+            title="Trocar de perfil"
+            style={{
+              padding: "6px 12px", borderRadius: 8,
+              border: "1px solid var(--border)", background: "transparent",
+              color: "var(--text-muted)", fontSize: 12,
+              display: "flex", alignItems: "center", gap: 5,
+              cursor: "pointer",
+              touchAction: "manipulation",
+              WebkitTapHighlightColor: "transparent",
+              userSelect: "none",
+            } as React.CSSProperties}
+          >
+            🔄 Trocar
+          </button>
+        </div>
       </header>
 
       {/* Messages */}

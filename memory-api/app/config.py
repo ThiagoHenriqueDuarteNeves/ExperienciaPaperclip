@@ -46,8 +46,21 @@ class Settings(BaseSettings):
     # Deepseek key (LLM only — not used for embeddings)
     deepseek_api_key: str = ""
 
+    rrf_k: int = 60
+    fts_language: str = "portuguese"
+
     letta_base_url: str = "http://letta:8283"
     letta_api_key: str = ""
+
+    # Auth (multi-user, PIN validated server-side). Tokens are HMAC-signed with
+    # this secret — set MEMORY_AUTH_SECRET in production. Empty falls back to a
+    # dev secret (logged as a warning on startup).
+    auth_secret: str = ""
+    auth_token_ttl_hours: int = 720  # 30 days
+
+    @property
+    def effective_auth_secret(self) -> str:
+        return self.auth_secret or "dev-insecure-auth-secret-change-me"
 
     @property
     def effective_letta_api_key(self) -> str:

@@ -101,6 +101,7 @@ services:
       - MEMORY_PGVECTOR_DATABASE=memory_db
       - MEMORY_LETTA_BASE_URL=http://letta:8283
       - MEMORY_LETTA_API_KEY=${LETTA_API_KEY:-letta-local-dev-key}
+      - MEMORY_AUTH_SECRET=${MEMORY_AUTH_SECRET:-dev-insecure-auth-secret-change-me}
       - MEMORY_LLM_PROVIDER=${LLM_PROVIDER:-anthropic}
       # Embedding configuration — embeddings are always API-based (1536-dim).
       # For Deepseek: set DEEPSEEK_API_KEY in .env (endpoint resolved automatically).
@@ -110,6 +111,8 @@ services:
       - MEMORY_EMBEDDING_API_MODEL=${MEMORY_EMBEDDING_API_MODEL:-text-embedding-3-large}
       - MEMORY_DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    volumes:
+      - ./migrations:/migrations
     depends_on:
       memory-db:
         condition: service_healthy

@@ -6,8 +6,8 @@ const MEMORY_API_BASE = process.env.MEMORY_API_URL || "http://localhost:8001";
 
 export async function POST(req: NextRequest) {
   const body = await req.text();
-  const userId = req.headers.get("x-user-id") || "default-user";
   const conversationId = req.headers.get("x-conversation-id") || "default";
+  const authorization = req.headers.get("authorization") || "";
 
   let upstream: Response;
   try {
@@ -15,7 +15,7 @@ export async function POST(req: NextRequest) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-user-id": userId,
+        Authorization: authorization,
         "x-conversation-id": conversationId,
         skip_zrok_interstitial: "true",
       },

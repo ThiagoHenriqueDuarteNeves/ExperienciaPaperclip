@@ -466,3 +466,33 @@ async def pull_saudade(user_id: str | None = None, limit: int = 1) -> list[dict]
             user_id, limit,
         )
         return [_serialize_aurora_row(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# User profiles (multi-user auth)
+# ---------------------------------------------------------------------------
+
+
+async def create_user_profile(
+    user_id: str, display_name: str, pin_hash: str, pin_salt: str
+) -> None:
+    """Insert a new user profile. Raises asyncpg.UniqueViolationError on conflict."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO user_profiles (user_id, display_name, pin_hash, pin_salt)
+               VALUES ($1, $2, $3, $4)""",
+            user_id, display_name, pin_hash, pin_salt,
+        )
+
+
+async def get_user_profile(user_id: str) -> dict | None:
+    """Fetch a user profile by id, or None if it does not exist."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT user_id, display_name, pin_hash, pin_salt, created_at
+               FROM user_profiles WHERE user_id = $1""",
+            user_id,
+        )
+        return _serialize_row(row) if row else None
