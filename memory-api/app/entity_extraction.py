@@ -77,8 +77,14 @@ def extract_knowledge(text: str) -> dict:
             if stop_reason == "error" or "error" in data:
                 raise ExtractionError(f"Claude returned an error response: {data.get('error')}")
 
-            block = data["content"][0]
-            content_text = block.get("text", block.get("input", {}).get("text", ""))
+            # Reasoning models (e.g. deepseek via the anthropic-compat endpoint)
+            # emit a 'thinking' block BEFORE the 'text' block, so content[0] is not
+            # the answer. Concatenate every text block instead of assuming [0].
+            content_text = "".join(
+                b.get("text", "")
+                for b in data.get("content", [])
+                if b.get("type") == "text"
+            )
 
             return _parse_extraction(content_text)
 

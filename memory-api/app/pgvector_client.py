@@ -58,6 +58,28 @@ async def connection() -> AsyncIterator[asyncpg.Connection]:
         yield conn
 
 
+def _serialize_row(r) -> dict:
+    """Convert an asyncpg Record to a plain dict with Python-native types.
+
+    asyncpg returns UUID as asyncpg.pgproto.UUID and JSONB as a raw JSON
+    string in some configurations. This normalises both to str and dict.
+    """
+    d = {}
+    for key in r.keys():
+        val = r[key]
+        if hasattr(val, "hex") and hasattr(val, "int") and not isinstance(val, (int, float)):
+            val = str(val)
+        elif isinstance(val, str):
+            stripped = val.strip()
+            if stripped and stripped[0] in ("{", "[", '"'):
+                try:
+                    val = json.loads(val)
+                except (ValueError, TypeError):
+                    pass
+        d[key] = val
+    return d
+
+
 def _format_vector(embedding: list[float]) -> str:
     """Format a Python float list as a pgvector-compatible string literal."""
     inner = ",".join(str(v) for v in embedding)
@@ -112,7 +134,7 @@ async def load_thread(
                LIMIT $2""",
             thread_id, limit,
         )
-        return [dict(r) for r in rows]
+        return [_serialize_row(r) for r in rows]
 
 
 async def search_similar(
@@ -135,7 +157,119 @@ async def search_similar(
                LIMIT $4""",
             vec, user_id, min_similarity, top_k,
         )
-        return [dict(r) for r in rows]
+        return [_serialize_row(r) for r in rows]
+
+
+async def search_semantic_hybrid(
+    embedding: list[float],
+    query_text: str,
+    user_id: str | None = None,
+    top_k: int = 5,
+    rrf_k: int = 60,
+    fts_language: str = "portuguese",
+) -> list[dict]:
+    """Hybrid ANN + BM25 search on semantic_memory fused via RRF."""
+    pool = await get_pool()
+    vec = _format_vector(embedding)
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            WITH
+            vec AS (
+                SELECT id,
+                       ROW_NUMBER() OVER (ORDER BY embedding <=> $1::vector) AS rank
+                FROM semantic_memory
+                WHERE ($2::text IS NULL OR user_id = $2)
+                  AND embedding IS NOT NULL
+                LIMIT $3 * 3
+            ),
+            fts AS (
+                SELECT id,
+                       ROW_NUMBER() OVER (
+                           ORDER BY ts_rank_cd(content_fts,
+                               websearch_to_tsquery($4, $5)) DESC
+                       ) AS rank
+                FROM semantic_memory
+                WHERE ($2::text IS NULL OR user_id = $2)
+                  AND content_fts @@ websearch_to_tsquery($4, $5)
+                LIMIT $3 * 3
+            ),
+            fused AS (
+                SELECT
+                    COALESCE(v.id, f.id) AS id,
+                    COALESCE(1.0 / ($6 + v.rank), 0.0)
+                    + COALESCE(1.0 / ($6 + f.rank), 0.0) AS rrf_score
+                FROM vec v
+                FULL OUTER JOIN fts f ON v.id = f.id
+            )
+            SELECT
+                sm.id, sm.user_id, sm.key, sm.content, sm.importance,
+                COALESCE(1 - (sm.embedding <=> $1::vector), 0.0) AS similarity,
+                fused.rrf_score
+            FROM fused
+            JOIN semantic_memory sm ON fused.id = sm.id
+            ORDER BY fused.rrf_score DESC
+            LIMIT $3
+            """,
+            vec, user_id, top_k, fts_language, query_text, rrf_k,
+        )
+        return [_serialize_row(r) for r in rows]
+
+
+async def search_similar_hybrid(
+    embedding: list[float],
+    query_text: str,
+    user_id: str | None = None,
+    top_k: int = 5,
+    rrf_k: int = 60,
+    fts_language: str = "portuguese",
+) -> list[dict]:
+    """Hybrid ANN + BM25 search on conversation_messages fused via RRF."""
+    pool = await get_pool()
+    vec = _format_vector(embedding)
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            WITH
+            vec AS (
+                SELECT id,
+                       ROW_NUMBER() OVER (ORDER BY embedding <=> $1::vector) AS rank
+                FROM conversation_messages
+                WHERE ($2::text IS NULL OR metadata->>'user_id' = $2)
+                  AND embedding IS NOT NULL
+                LIMIT $3 * 3
+            ),
+            fts AS (
+                SELECT id,
+                       ROW_NUMBER() OVER (
+                           ORDER BY ts_rank_cd(content_fts,
+                               websearch_to_tsquery($4, $5)) DESC
+                       ) AS rank
+                FROM conversation_messages
+                WHERE ($2::text IS NULL OR metadata->>'user_id' = $2)
+                  AND content_fts @@ websearch_to_tsquery($4, $5)
+                LIMIT $3 * 3
+            ),
+            fused AS (
+                SELECT
+                    COALESCE(v.id, f.id) AS id,
+                    COALESCE(1.0 / ($6 + v.rank), 0.0)
+                    + COALESCE(1.0 / ($6 + f.rank), 0.0) AS rrf_score
+                FROM vec v
+                FULL OUTER JOIN fts f ON v.id = f.id
+            )
+            SELECT
+                cm.id, cm.content, cm.metadata,
+                COALESCE(1 - (cm.embedding <=> $1::vector), 0.0) AS similarity,
+                fused.rrf_score
+            FROM fused
+            JOIN conversation_messages cm ON fused.id = cm.id
+            ORDER BY fused.rrf_score DESC
+            LIMIT $3
+            """,
+            vec, user_id, top_k, fts_language, query_text, rrf_k,
+        )
+        return [_serialize_row(r) for r in rows]
 
 
 async def delete_message(message_id: str) -> None:
@@ -193,4 +327,142 @@ async def search_semantic(
                LIMIT $4""",
             vec, user_id, min_similarity, top_k,
         )
-        return [dict(r) for r in rows]
+        return [_serialize_row(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Arquivo Aurora — affective memory CRUD
+# ---------------------------------------------------------------------------
+
+
+def _serialize_aurora_row(r) -> dict:
+    """Serialize an arquivo_aurora row, normalising UUID[] (conexoes) elements.
+
+    _serialize_row only normalises the top-level value, so UUID elements inside
+    the conexoes array would stay as asyncpg UUID objects — convert them to str.
+    """
+    d = _serialize_row(r)
+    conexoes = d.get("conexoes")
+    if isinstance(conexoes, list):
+        d["conexoes"] = [str(c) for c in conexoes]
+    return d
+
+
+async def store_aurora(
+    *,
+    user_id: str,
+    tipo: str,
+    disparo: str,
+    fato: str,
+    tom_do_usuario: str,
+    minha_reacao_emocional: str,
+    importancia: int,
+    ressonancia: int,
+    intimidade: str,
+    reacao_simulada: str | None = None,
+    saudade: bool = False,
+    tags: list[str] | None = None,
+    conexoes: list[str] | None = None,
+    contexto_extra: str | None = None,
+    bilhete_interno: str | None = None,
+    data: str | None = None,
+    embedding: list[float] | None = None,
+) -> str:
+    pool = await get_pool()
+    vec = _format_vector(embedding) if embedding else None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """INSERT INTO arquivo_aurora (
+                   user_id, data, tipo, disparo, fato, tom_do_usuario,
+                   minha_reacao_emocional, reacao_simulada, importancia,
+                   ressonancia, intimidade, saudade, tags, conexoes,
+                   contexto_extra, bilhete_interno, embedding)
+               VALUES (
+                   $1, COALESCE($2::date, CURRENT_DATE), $3, $4, $5, $6,
+                   $7, $8, $9, $10, $11, $12, $13, $14::uuid[], $15, $16,
+                   $17::vector)
+               RETURNING id""",
+            user_id, data, tipo, disparo, fato, tom_do_usuario,
+            minha_reacao_emocional, reacao_simulada, importancia,
+            ressonancia, intimidade, saudade, tags or [], conexoes or [],
+            contexto_extra, bilhete_interno, vec,
+        )
+        return str(row["id"])
+
+
+async def search_aurora_hybrid(
+    embedding: list[float],
+    query_text: str,
+    user_id: str | None = None,
+    top_k: int = 5,
+    rrf_k: int = 60,
+    fts_language: str = "portuguese",
+) -> list[dict]:
+    """Hybrid ANN + BM25 search on arquivo_aurora fused via RRF."""
+    pool = await get_pool()
+    vec = _format_vector(embedding)
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            WITH
+            vec AS (
+                SELECT id,
+                       ROW_NUMBER() OVER (ORDER BY embedding <=> $1::vector) AS rank
+                FROM arquivo_aurora
+                WHERE ($2::text IS NULL OR user_id = $2)
+                  AND embedding IS NOT NULL
+                LIMIT $3 * 3
+            ),
+            fts AS (
+                SELECT id,
+                       ROW_NUMBER() OVER (
+                           ORDER BY ts_rank_cd(fato_fts,
+                               websearch_to_tsquery($4, $5)) DESC
+                       ) AS rank
+                FROM arquivo_aurora
+                WHERE ($2::text IS NULL OR user_id = $2)
+                  AND fato_fts @@ websearch_to_tsquery($4, $5)
+                LIMIT $3 * 3
+            ),
+            fused AS (
+                SELECT
+                    COALESCE(v.id, f.id) AS id,
+                    COALESCE(1.0 / ($6 + v.rank), 0.0)
+                    + COALESCE(1.0 / ($6 + f.rank), 0.0) AS rrf_score
+                FROM vec v
+                FULL OUTER JOIN fts f ON v.id = f.id
+            )
+            SELECT
+                a.id, a.user_id, a.data, a.tipo, a.disparo, a.fato,
+                a.tom_do_usuario, a.minha_reacao_emocional, a.reacao_simulada,
+                a.importancia, a.ressonancia, a.intimidade, a.saudade,
+                a.tags, a.conexoes, a.contexto_extra, a.bilhete_interno,
+                COALESCE(1 - (a.embedding <=> $1::vector), 0.0) AS similarity,
+                fused.rrf_score
+            FROM fused
+            JOIN arquivo_aurora a ON fused.id = a.id
+            ORDER BY fused.rrf_score DESC
+            LIMIT $3
+            """,
+            vec, user_id, top_k, fts_language, query_text, rrf_k,
+        )
+        return [_serialize_aurora_row(r) for r in rows]
+
+
+async def pull_saudade(user_id: str | None = None, limit: int = 1) -> list[dict]:
+    """Pull random records flagged with saudade — 'looking at a photo for no reason'."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT id, user_id, data, tipo, disparo, fato, tom_do_usuario,
+                      minha_reacao_emocional, reacao_simulada, importancia,
+                      ressonancia, intimidade, saudade, tags, conexoes,
+                      contexto_extra, bilhete_interno
+               FROM arquivo_aurora
+               WHERE saudade = TRUE
+                 AND ($1::text IS NULL OR user_id = $1)
+               ORDER BY random()
+               LIMIT $2""",
+            user_id, limit,
+        )
+        return [_serialize_aurora_row(r) for r in rows]

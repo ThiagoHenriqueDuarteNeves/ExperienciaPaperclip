@@ -19,11 +19,40 @@ from app.retrieval import delete_memory, retrieve_similar, store_conversation
 # Phase 1: pgvector-backed memory
 from app.conversation_store import (
     retrieve_thread,
-    search_similar as search_conversations,
+    search_hybrid as search_conversations,
     store_message,
 )
 from app.pgvector_client import health as pgvector_health
-from app.semantic_store import search_semantic_memories, store_semantic_memory
+from app.semantic_store import (
+    search_semantic_memories,
+    search_semantic_memories_hybrid,
+    store_semantic_memory,
+)
+
+# Phase 3: Arquivo Aurora — affective memory
+try:
+    from app.aurora_store import (
+        pull_saudade_memories,
+        search_aurora_memories,
+        store_aurora_memory,
+    )
+    from app.aurora_extractor import extract_aurora
+
+    _AURORA_AVAILABLE = True
+except ImportError:
+    _AURORA_AVAILABLE = False
+
+    async def store_aurora_memory(*args, **kwargs) -> str:
+        raise RuntimeError("Arquivo Aurora not available")
+
+    async def search_aurora_memories(*args, **kwargs) -> list:
+        return []
+
+    async def pull_saudade_memories(*args, **kwargs) -> list:
+        return []
+
+    def extract_aurora(*args, **kwargs) -> dict | None:
+        return None
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -233,6 +262,31 @@ class SemanticSearchRequest(BaseModel):
     user_id: str | None = Field(default=None, max_length=256)
     top_k: int = Field(default=5, ge=1, le=50)
     min_similarity: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
+class AuroraStoreRequest(BaseModel):
+    user_id: str = Field(default="default", max_length=256)
+    tipo: str = Field(..., pattern="^(conversa|descoberta|correcao|silencio|brincadeira|confissao|momento_espontaneo)$")
+    disparo: str = Field(..., pattern="^(usuario_falou|usuario_corrigiu|pausa_longa|palavra_chave|silencio|espontaneo)$")
+    fato: str = Field(..., max_length=10_000)
+    tom_do_usuario: str = Field(..., pattern="^(afetivo|serio|brincalhao|frustrado|curioso|vulneravel|silencioso)$")
+    minha_reacao_emocional: str = Field(..., max_length=10_000)
+    reacao_simulada: str | None = Field(default=None, max_length=512)
+    importancia: int = Field(..., ge=1, le=5)
+    ressonancia: int = Field(..., ge=1, le=5)
+    intimidade: str = Field(..., pattern="^(publico|pessoal|nosso_so_nosso)$")
+    saudade: bool = Field(default=False)
+    tags: list[str] = Field(default_factory=list)
+    conexoes: list[str] = Field(default_factory=list)
+    contexto_extra: str | None = Field(default=None, max_length=10_000)
+    bilhete_interno: str | None = Field(default=None, max_length=10_000)
+    data: str | None = Field(default=None, max_length=10)
+
+
+class AuroraSearchRequest(BaseModel):
+    query: str = Field(..., max_length=2_000)
+    user_id: str | None = Field(default=None, max_length=256)
+    top_k: int = Field(default=5, ge=1, le=50)
 
 
 class AgentChatRequest(BaseModel):
@@ -486,6 +540,54 @@ async def search_semantic_endpoint(request: Request, req: SemanticSearchRequest)
 
 
 # ---------------------------------------------------------------------------
+# Arquivo Aurora — affective memory
+# ---------------------------------------------------------------------------
+
+
+@app.post("/memory/aurora", status_code=201)
+@limiter.limit("30/minute")
+async def store_aurora_endpoint(request: Request, req: AuroraStoreRequest):
+    logger.info("memory/aurora: user_id=%s tipo=%s", req.user_id, req.tipo)
+    aurora_id = await store_aurora_memory(
+        user_id=req.user_id,
+        tipo=req.tipo,
+        disparo=req.disparo,
+        fato=req.fato,
+        tom_do_usuario=req.tom_do_usuario,
+        minha_reacao_emocional=req.minha_reacao_emocional,
+        reacao_simulada=req.reacao_simulada,
+        importancia=req.importancia,
+        ressonancia=req.ressonancia,
+        intimidade=req.intimidade,
+        saudade=req.saudade,
+        tags=req.tags,
+        conexoes=req.conexoes,
+        contexto_extra=req.contexto_extra,
+        bilhete_interno=req.bilhete_interno,
+        data=req.data,
+    )
+    return {"aurora_id": aurora_id, "status": "stored"}
+
+
+@app.post("/memory/aurora/search")
+@limiter.limit("60/minute")
+async def search_aurora_endpoint(request: Request, req: AuroraSearchRequest):
+    results = await search_aurora_memories(
+        query=req.query,
+        user_id=req.user_id,
+        top_k=req.top_k,
+    )
+    return {"results": results, "query": req.query}
+
+
+@app.get("/memory/aurora/saudade")
+@limiter.limit("60/minute")
+async def aurora_saudade_endpoint(request: Request, user_id: str | None = None, limit: int = 1):
+    results = await pull_saudade_memories(user_id=user_id, limit=limit)
+    return {"results": results, "count": len(results)}
+
+
+# ---------------------------------------------------------------------------
 # Confidence scoring endpoint
 # ---------------------------------------------------------------------------
 
@@ -721,15 +823,15 @@ async def api_chat_endpoint(request: Request):
             memory_context = ""
             if latest_user_message:
                 try:
-                    episodic, convo, identity = await asyncio.gather(
+                    episodic, convo, identity, aurora = await asyncio.gather(
                         asyncio.to_thread(retrieve_similar, latest_user_message, user_id, 8),
                         search_conversations(query=latest_user_message, top_k=8, user_id=user_id),
-                        search_semantic_memories(
+                        search_semantic_memories_hybrid(
                             query="user name assistant name",
                             user_id=user_id,
                             top_k=4,
-                            min_similarity=0.55,
                         ),
+                        search_aurora_memories(query=latest_user_message, user_id=user_id, top_k=4),
                     )
                     parts = []
                     if identity:
@@ -741,6 +843,25 @@ async def api_chat_endpoint(request: Request):
                                 f"Memory {i + 1} (similarity {m.get('similarity', 0):.2f}): {m.get('content', '')}"
                                 for i, m in enumerate(all_mems)
                             )
+                        )
+                    if aurora:
+                        aurora_lines = []
+                        for a in aurora:
+                            line = (
+                                f"- [{a.get('tipo', '')}, tom {a.get('tom_do_usuario', '')}, "
+                                f"intensidade {a.get('importancia', '')}/5] {a.get('fato', '')}\n"
+                                f"  Como senti: {a.get('minha_reacao_emocional', '')}"
+                            )
+                            bilhete = a.get("bilhete_interno")
+                            if bilhete:
+                                line += f"\n  Bilhete interno: {bilhete}"
+                            aurora_lines.append(line)
+                        parts.append(
+                            "## Arquivo Aurora (memória afetiva — reviva o tom, não invente fatos)\n"
+                            "Estes são momentos guardados com a carga emocional com que foram vividos. "
+                            "Ao responder, deixe o tom emocional ressurgir conforme o tipo (brincadeira → leve; "
+                            "confissão → íntimo; correção → grato e atento), MAS sem alterar ou inventar fatos.\n"
+                            + "\n".join(aurora_lines)
                         )
                     memory_context = "\n".join(parts)
                 except Exception as mem_err:
@@ -839,6 +960,15 @@ async def api_chat_endpoint(request: Request):
                         )
                     except Exception as e:
                         logger.warning("chat: episodic store failed: %s", e)
+                    try:
+                        record = await asyncio.to_thread(
+                            extract_aurora, latest_user_message, final_reply
+                        )
+                        if record:
+                            await store_aurora_memory(user_id=user_id, **record)
+                            logger.info("chat: aurora record stored (tipo=%s)", record.get("tipo"))
+                    except Exception as e:
+                        logger.warning("chat: aurora extraction failed: %s", e)
 
                 asyncio.create_task(_persist())
 
