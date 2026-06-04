@@ -5,6 +5,7 @@ import {
   listProfiles,
   login,
   register,
+  slugify,
   type Profile,
   type Session,
 } from "../lib/auth";
@@ -46,7 +47,19 @@ export default function ProfileGate({
       onAuthenticated(s);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Falha ao criar";
-      setError(msg.includes("taken") ? "Esse nome já existe — entre com o PIN." : msg);
+      // Profile already exists (e.g. a previous attempt registered but the
+      // response was lost). Self-heal: try logging in with the same name + PIN.
+      if (msg.includes("taken") || msg.includes("409")) {
+        try {
+          const s = await login(slugify(name), pin);
+          onAuthenticated(s);
+          return;
+        } catch {
+          setError("Esse nome já existe. Se é seu, confira o PIN.");
+        }
+      } else {
+        setError(msg);
+      }
     } finally {
       setBusy(false);
     }

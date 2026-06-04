@@ -23,20 +23,11 @@ const SESSION_KEY = "memory-session";
 // we re-auth before the server rejects us.
 const SESSION_TTL_MS = 715 * 60 * 60 * 1000;
 
-/**
- * Base URL of the memory-api. In production NEXT_PUBLIC_CHAT_API_URL points at
- * ".../api/chat"; strip that to get the API root for /auth/* calls. In local
- * dev it is unset, so go straight to the backend (CORS is wildcard-open there).
- */
-export function apiBase(): string {
-  const chat = process.env.NEXT_PUBLIC_CHAT_API_URL;
-  if (chat) return chat.replace(/\/api\/chat\/?$/, "");
-  return process.env.NEXT_PUBLIC_MEMORY_API_URL || "http://localhost:8001";
-}
-
+// Auth goes through the same-origin Next edge proxy (/api/auth/*) — NOT direct
+// to the backend — to avoid browser CORS and the zrok interstitial blocking the
+// preflight. The edge route forwards server-side to the memory-api.
 const AUTH_HEADERS: Record<string, string> = {
   "Content-Type": "application/json",
-  skip_zrok_interstitial: "true",
 };
 
 /** Derive a stable user_id from a display name (lowercase, no spaces/accents). */
@@ -103,8 +94,8 @@ interface AuthResponse {
   display_name: string;
 }
 
-async function authCall(path: string, payload: Record<string, unknown>): Promise<Session> {
-  const res = await fetch(`${apiBase()}${path}`, {
+async function authCall(action: string, payload: Record<string, unknown>): Promise<Session> {
+  const res = await fetch(`/api/auth/${action}`, {
     method: "POST",
     headers: AUTH_HEADERS,
     body: JSON.stringify(payload),
@@ -133,10 +124,10 @@ async function authCall(path: string, payload: Record<string, unknown>): Promise
 export async function register(name: string, pin: string): Promise<Session> {
   const userId = slugify(name);
   if (!userId) throw new Error("Nome inválido");
-  return authCall("/auth/register", { user_id: userId, pin, display_name: name.trim() });
+  return authCall("register", { user_id: userId, pin, display_name: name.trim() });
 }
 
 /** Log into an existing profile by user_id + PIN. Throws on 401/error. */
 export async function login(userId: string, pin: string): Promise<Session> {
-  return authCall("/auth/login", { user_id: userId, pin });
+  return authCall("login", { user_id: userId, pin });
 }
