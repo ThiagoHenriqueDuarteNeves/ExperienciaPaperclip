@@ -3,7 +3,6 @@ import json
 import logging
 import math
 
-import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -13,6 +12,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from app.chroma_client import health as chroma_health
+from app.llm_client import stream_text
 from app.logging_config import configure_logging
 from app.retrieval import delete_memory, retrieve_similar, store_conversation
 
@@ -869,8 +869,6 @@ Relevant records from past conversations are retrieved automatically and given t
 @limiter.limit("20/minute")
 async def api_chat_endpoint(request: Request):
     """Full chat pipeline: recall memories, stream LLM response, persist turn."""
-    from app.config import settings
-
     body = await request.json()
     messages = body.get("messages", [])
     # Authenticated multi-user: user_id is derived from the signed token, not a
@@ -963,46 +961,15 @@ async def api_chat_endpoint(request: Request):
                     )
                 )
 
-            # 4. Stream from LLM (Anthropic-compatible API)
-            api_key = settings.effective_claude_api_key
-            api_base = settings.effective_llm_api_base.rstrip("/")
-
-            async with httpx.AsyncClient(timeout=120) as client:
-                async with client.stream(
-                    "POST",
-                    f"{api_base}/messages",
-                    headers={
-                        "x-api-key": api_key,
-                        "anthropic-version": "2023-06-01",
-                        "content-type": "application/json",
-                    },
-                    json={
-                        "model": settings.claude_model,
-                        "max_tokens": 4096,
-                        "system": system,
-                        "messages": [{"role": m["role"], "content": m["content"]} for m in messages],
-                        "stream": True,
-                    },
-                ) as resp:
-                    resp.raise_for_status()
-                    async for line in resp.aiter_lines():
-                        if not line.startswith("data: "):
-                            continue
-                        raw = line[6:]
-                        if raw == "[DONE]":
-                            break
-                        try:
-                            ev = json.loads(raw)
-                        except json.JSONDecodeError:
-                            continue
-                        if ev.get("type") == "content_block_delta":
-                            delta = ev.get("delta", {})
-                            if delta.get("type") == "text_delta":
-                                chunk = delta.get("text", "")
-                                final_text += chunk
-                                yield f"data: {json.dumps({'event': 'text', 'content': chunk})}\n\n"
-                        elif ev.get("type") == "message_stop":
-                            break
+            # 4. Stream from LLM via the unified client; re-wrap each chunk into
+            #    our browser-facing SSE protocol.
+            async for chunk in stream_text(
+                messages=[{"role": m["role"], "content": m["content"]} for m in messages],
+                system=system,
+                max_tokens=4096,
+            ):
+                final_text += chunk
+                yield f"data: {json.dumps({'event': 'text', 'content': chunk})}\n\n"
 
             yield f"data: {json.dumps({'event': 'done', 'text': final_text})}\n\n"
 

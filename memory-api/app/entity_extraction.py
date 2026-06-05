@@ -6,6 +6,7 @@ import logging
 import httpx
 
 from app.config import settings
+from app.llm_client import LLMError, complete_text
 
 logger = logging.getLogger(__name__)
 
@@ -37,10 +38,6 @@ If nothing meaningful can be extracted, return {"entities": [], "relationships":
 """
 
 
-class ExtractionError(Exception):
-    """Raised when Claude returns an unusable extraction response."""
-
-
 def extract_knowledge(text: str) -> dict:
     """Extract entities and relationships from text using Claude."""
     api_key = settings.effective_claude_api_key
@@ -48,47 +45,14 @@ def extract_knowledge(text: str) -> dict:
         logger.warning("entity_extraction: no API key configured, skipping extraction")
         return {"entities": [], "relationships": []}
 
-    api_base = settings.effective_llm_api_base.rstrip("/")
+    messages = [{"role": "user", "content": EXTRACTION_PROMPT + "\n\nText:\n" + text}]
 
     for attempt in range(settings.max_extraction_retries + 1):
         try:
-            resp = httpx.post(
-                f"{api_base}/messages",
-                headers={
-                    "x-api-key": api_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
-                json={
-                    "model": settings.claude_model,
-                    "max_tokens": 2048,
-                    "messages": [
-                        {"role": "user", "content": EXTRACTION_PROMPT + "\n\nText:\n" + text}
-                    ],
-                },
-                timeout=30,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-
-            stop_reason = data.get("stop_reason")
-            if stop_reason == "max_tokens":
-                raise ExtractionError("Response truncated (max_tokens reached)")
-            if stop_reason == "error" or "error" in data:
-                raise ExtractionError(f"Claude returned an error response: {data.get('error')}")
-
-            # Reasoning models (e.g. deepseek via the anthropic-compat endpoint)
-            # emit a 'thinking' block BEFORE the 'text' block, so content[0] is not
-            # the answer. Concatenate every text block instead of assuming [0].
-            content_text = "".join(
-                b.get("text", "")
-                for b in data.get("content", [])
-                if b.get("type") == "text"
-            )
-
+            content_text = complete_text(messages, max_tokens=2048)
             return _parse_extraction(content_text)
 
-        except ExtractionError as exc:
+        except LLMError as exc:
             logger.warning(
                 "entity_extraction: attempt %d/%d failed — %s",
                 attempt + 1,

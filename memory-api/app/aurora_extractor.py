@@ -15,6 +15,7 @@ import logging
 import httpx
 
 from app.config import settings
+from app.llm_client import LLMError, complete_text
 
 logger = logging.getLogger(__name__)
 
@@ -68,10 +69,6 @@ Regras:
 """
 
 
-class AuroraExtractionError(Exception):
-    """Raised when Claude returns an unusable extraction response."""
-
-
 def extract_aurora(user_message: str, assistant_reply: str) -> dict | None:
     """Extract a single affective memory record from a conversation turn.
 
@@ -83,48 +80,17 @@ def extract_aurora(user_message: str, assistant_reply: str) -> dict | None:
         logger.warning("aurora_extractor: no API key configured, skipping extraction")
         return None
 
-    api_base = settings.effective_llm_api_base.rstrip("/")
     turn = f"Usuário: {user_message}\nAssistente: {assistant_reply}"
+    messages = [
+        {"role": "user", "content": AURORA_EXTRACTION_PROMPT + "\n\nTurno:\n" + turn}
+    ]
 
     for attempt in range(settings.max_extraction_retries + 1):
         try:
-            resp = httpx.post(
-                f"{api_base}/messages",
-                headers={
-                    "x-api-key": api_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
-                json={
-                    "model": settings.claude_model,
-                    "max_tokens": 2048,
-                    "messages": [
-                        {"role": "user", "content": AURORA_EXTRACTION_PROMPT + "\n\nTurno:\n" + turn}
-                    ],
-                },
-                timeout=30,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-
-            stop_reason = data.get("stop_reason")
-            if stop_reason == "max_tokens":
-                raise AuroraExtractionError("Response truncated (max_tokens reached)")
-            if stop_reason == "error" or "error" in data:
-                raise AuroraExtractionError(f"Claude returned an error: {data.get('error')}")
-
-            # Reasoning models (e.g. deepseek via the anthropic-compat endpoint)
-            # return a 'thinking' block BEFORE the 'text' block, so content[0] is
-            # not the answer. Concatenate every text block instead of assuming [0].
-            content_text = "".join(
-                b.get("text", "")
-                for b in data.get("content", [])
-                if b.get("type") == "text"
-            )
-
+            content_text = complete_text(messages, max_tokens=2048)
             return _parse_aurora(content_text)
 
-        except AuroraExtractionError as exc:
+        except LLMError as exc:
             logger.warning(
                 "aurora_extractor: attempt %d/%d failed — %s",
                 attempt + 1, settings.max_extraction_retries + 1, exc,
