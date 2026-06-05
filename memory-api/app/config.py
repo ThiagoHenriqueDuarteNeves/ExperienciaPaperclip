@@ -20,7 +20,14 @@ class Settings(BaseSettings):
 
     # LLM Configuration (Anthropic or Deepseek)
     llm_provider: str = "anthropic"  # 'anthropic' or 'deepseek'
-    llm_api_base: str = "https://api.anthropic.com/v1"
+    # Explicit override (MEMORY_LLM_API_BASE). When empty, a per-provider default
+    # is used (see effective_llm_api_base). Set this to point at any
+    # Anthropic-Messages-compatible endpoint (e.g. a local proxy).
+    llm_api_base: str = ""
+    # Default base for the 'deepseek' provider — overridable via
+    # MEMORY_DEEPSEEK_API_BASE without changing provider/code.
+    deepseek_api_base: str = "https://api.deepseek.com/anthropic"
+    anthropic_api_base: str = "https://api.anthropic.com/v1"
     claude_api_key: str = ""
     claude_model: str = "claude-sonnet-4-20250506"
     max_extraction_retries: int = 2
@@ -49,6 +56,20 @@ class Settings(BaseSettings):
     rrf_k: int = 60
     fts_language: str = "portuguese"
 
+    # Recall curation (chat_pipeline). Smaller top_k + a relevance gate + a char
+    # budget keep the injected memory compact instead of dumping every hit.
+    recall_episodic_k: int = 4
+    recall_convo_k: int = 4
+    recall_identity_k: int = 4
+    recall_aurora_k: int = 3
+    recall_min_similarity: float = 0.7
+    recall_char_budget: int = 6000
+    # Fase C — cross-encoder re-ranking (opt-in; heavy extra model, default off).
+    recall_rerank_enabled: bool = False
+    recall_rerank_top_n: int = 6
+    recall_rerank_candidate_k: int = 12
+    recall_rerank_model: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
+
     letta_base_url: str = "http://letta:8283"
     letta_api_key: str = ""
 
@@ -57,6 +78,11 @@ class Settings(BaseSettings):
     # dev secret (logged as a warning on startup).
     auth_secret: str = ""
     auth_token_ttl_hours: int = 720  # 30 days
+
+    # Memory inspector (local debug tool). OFF by default so the endpoints are
+    # never exposed via the zrok share unless explicitly enabled for local use.
+    # Enable with MEMORY_INSPECT_ENABLED=true.
+    inspect_enabled: bool = False
 
     @property
     def effective_auth_secret(self) -> str:
@@ -72,10 +98,18 @@ class Settings(BaseSettings):
 
     @property
     def effective_llm_api_base(self) -> str:
-        """Get LLM API base URL, supporting both Anthropic and Deepseek."""
+        """Get LLM API base URL.
+
+        Resolution order:
+        1. MEMORY_LLM_API_BASE — explicit override, always wins (any provider).
+        2. per-provider default — deepseek -> MEMORY_DEEPSEEK_API_BASE,
+           otherwise MEMORY_ANTHROPIC_API_BASE.
+        """
+        if self.llm_api_base:
+            return self.llm_api_base
         if self.llm_provider == "deepseek":
-            return "https://api.deepseek.com/anthropic"
-        return self.llm_api_base or "https://api.anthropic.com/v1"
+            return self.deepseek_api_base
+        return self.anthropic_api_base
 
     @property
     def effective_embedding_api_base(self) -> str:

@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS conversation_messages (
     role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'tool', 'system')),
     content TEXT NOT NULL,
     embedding vector(1024),
+    content_fts tsvector GENERATED ALWAYS AS (to_tsvector('portuguese', content)) STORED,
     metadata JSONB DEFAULT '{}',
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -24,6 +25,9 @@ CREATE INDEX IF NOT EXISTS idx_conv_embedding
     ON conversation_messages USING hnsw (embedding vector_cosine_ops)
     WITH (m = 16, ef_construction = 200);
 
+CREATE INDEX IF NOT EXISTS idx_conv_content_fts
+    ON conversation_messages USING GIN (content_fts);
+
 -- Cross-thread semantic memory
 CREATE TABLE IF NOT EXISTS semantic_memory (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -31,6 +35,7 @@ CREATE TABLE IF NOT EXISTS semantic_memory (
     key TEXT NOT NULL,
     content TEXT NOT NULL,
     embedding vector(1024),
+    content_fts tsvector GENERATED ALWAYS AS (to_tsvector('portuguese', content)) STORED,
     importance REAL DEFAULT 0.0,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
@@ -43,6 +48,9 @@ CREATE INDEX IF NOT EXISTS idx_semantic_embedding
 
 CREATE INDEX IF NOT EXISTS idx_semantic_user
     ON semantic_memory (user_id, importance DESC);
+
+CREATE INDEX IF NOT EXISTS idx_semantic_content_fts
+    ON semantic_memory USING GIN (content_fts);
 
 -- LangGraph checkpoint tables (created by LangGraph, but pre-created for control)
 CREATE TABLE IF NOT EXISTS checkpoints (
