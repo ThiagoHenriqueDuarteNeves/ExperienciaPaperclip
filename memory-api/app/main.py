@@ -11,6 +11,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
+from app.chat_pipeline import assemble_memory_context, build_system, recall_layers
 from app.chroma_client import health as chroma_health
 from app.llm_client import stream_text
 from app.logging_config import configure_logging
@@ -25,7 +26,6 @@ from app.conversation_store import (
 from app.pgvector_client import health as pgvector_health
 from app.semantic_store import (
     search_semantic_memories,
-    search_semantic_memories_hybrid,
     store_semantic_memory,
 )
 
@@ -192,6 +192,11 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+
+# Memory inspector (local debug tool). Endpoints self-gate on settings.inspect_enabled.
+from app.inspect_api import router as inspect_router  # noqa: E402
+
+app.include_router(inspect_router)
 
 
 # ---------------------------------------------------------------------------
@@ -845,24 +850,8 @@ async def auth_me_endpoint(request: Request):
 
 # ---------------------------------------------------------------------------
 # Chat endpoint — full pipeline: recall → LLM stream → persist
+# Recall + system assembly live in app.chat_pipeline (shared with the inspector).
 # ---------------------------------------------------------------------------
-
-_CHAT_SYSTEM_PROMPT = """You are a warm, human-like conversational assistant with persistent memory across conversations.
-
-## How your memory works
-Relevant records from past conversations are retrieved automatically and given to you in a system section titled "Retrieved memories" — when relevant memory exists, it is ALREADY provided to you. You do not call any tool to fetch it.
-
-## Grounding and honesty — CRITICAL, follow strictly
-- The "Retrieved memories" section together with the current conversation are your ONLY sources of truth about the user, past events, names, stories, dates and facts.
-- Reproduce facts, names, dates, events and stories EXACTLY as they appear in memory. Never alter, embellish, dramatize, summarize away or contradict them. If memory records a story, retell that exact story — do not "improve" or reinvent it.
-- If the information needed to answer is NOT in the retrieved memories or in the current conversation, say plainly that you do not have it recorded, or ask the user. NEVER invent, guess, or fill in missing details and present them as real.
-- A short, honest "I don't have that recorded" is always better than a confident answer that might be wrong.
-- If a memory conflicts with your own assumptions, the memory always wins.
-- Never claim something happened, or describe events, unless it is supported by memory or the conversation.
-
-## Style
-- Natural, conversational tone. Reply in the same language the user is using (Portuguese by default).
-- Be concise unless the user asks for detail."""
 
 
 @app.post("/api/chat")
@@ -887,68 +876,16 @@ async def api_chat_endpoint(request: Request):
     async def generate():
         final_text = ""
         try:
-            # 1. Recall memories in parallel
+            # 1. Recall memories + 2. build system — shared with the inspector
+            #    (app.chat_pipeline) so what is sent here == what /inspect shows.
             memory_context = ""
             if latest_user_message:
                 try:
-                    episodic, convo, identity, aurora = await asyncio.gather(
-                        asyncio.to_thread(retrieve_similar, latest_user_message, user_id, 8),
-                        search_conversations(query=latest_user_message, top_k=8, user_id=user_id),
-                        search_semantic_memories_hybrid(
-                            query="user name assistant name",
-                            user_id=user_id,
-                            top_k=4,
-                        ),
-                        search_aurora_memories(query=latest_user_message, user_id=user_id, top_k=4),
-                    )
-                    parts = []
-                    if identity:
-                        parts.append("\n".join(f.get("content", "") for f in identity))
-                    all_mems = [*episodic, *convo]
-                    if all_mems:
-                        parts.append(
-                            "\n".join(
-                                f"Memory {i + 1} (similarity {m.get('similarity', 0):.2f}): {m.get('content', '')}"
-                                for i, m in enumerate(all_mems)
-                            )
-                        )
-                    if aurora:
-                        aurora_lines = []
-                        for a in aurora:
-                            line = (
-                                f"- [{a.get('tipo', '')}, tom {a.get('tom_do_usuario', '')}, "
-                                f"intensidade {a.get('importancia', '')}/5] {a.get('fato', '')}\n"
-                                f"  Como senti: {a.get('minha_reacao_emocional', '')}"
-                            )
-                            bilhete = a.get("bilhete_interno")
-                            if bilhete:
-                                line += f"\n  Bilhete interno: {bilhete}"
-                            aurora_lines.append(line)
-                        parts.append(
-                            "## Arquivo Aurora (memória afetiva — reviva o tom, não invente fatos)\n"
-                            "Estes são momentos guardados com a carga emocional com que foram vividos. "
-                            "Ao responder, deixe o tom emocional ressurgir conforme o tipo (brincadeira → leve; "
-                            "confissão → íntimo; correção → grato e atento), MAS sem alterar ou inventar fatos.\n"
-                            + "\n".join(aurora_lines)
-                        )
-                    memory_context = "\n".join(parts)
+                    layers = await recall_layers(user_id, latest_user_message)
+                    memory_context = assemble_memory_context(layers)
                 except Exception as mem_err:
                     logger.warning("chat: memory recall failed: %s", mem_err)
-
-            # 2. Build system array
-            system: list[dict] = [{"type": "text", "text": _CHAT_SYSTEM_PROMPT}]
-            if memory_context:
-                system.append({
-                    "type": "text",
-                    "text": (
-                        "## Retrieved memories (AUTHORITATIVE — your only record of the past)\n"
-                        "These are real records from previous conversations with this user. "
-                        "Treat them as ground truth. Answer using ONLY these records plus the "
-                        "current conversation. Reproduce any story or detail faithfully — do not "
-                        "alter or invent anything. If the answer is not here, say you do not have "
-                        "it recorded instead of guessing.\n\n" + memory_context
-                    ),
-                })
+            system = build_system(memory_context)
 
             # 3. Fire-and-forget: store user message
             if latest_user_message:
