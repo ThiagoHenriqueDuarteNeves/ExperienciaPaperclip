@@ -11,7 +11,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from app.chat_pipeline import assemble_memory_context, build_system, recall_layers
+from app.chat_pipeline import build_system, recall_and_build_system
 from app.chroma_client import health as chroma_health
 from app.llm_client import stream_text
 from app.logging_config import configure_logging
@@ -877,15 +877,17 @@ async def api_chat_endpoint(request: Request):
         final_text = ""
         try:
             # 1. Recall memories + 2. build system — shared with the inspector
-            #    (app.chat_pipeline) so what is sent here == what /inspect shows.
-            memory_context = ""
+            #    (app.chat_pipeline) so what is sent here == what /inspect shows,
+            #    including the relevance gating / dedup / budget curation.
+            system = build_system("")
             if latest_user_message:
                 try:
-                    layers = await recall_layers(user_id, latest_user_message)
-                    memory_context = assemble_memory_context(layers)
+                    _, _, system = await recall_and_build_system(
+                        user_id, latest_user_message
+                    )
                 except Exception as mem_err:
                     logger.warning("chat: memory recall failed: %s", mem_err)
-            system = build_system(memory_context)
+                    system = build_system("")
 
             # 3. Fire-and-forget: store user message
             if latest_user_message:
@@ -943,6 +945,23 @@ async def api_chat_endpoint(request: Request):
                             logger.info("chat: aurora record stored (tipo=%s)", record.get("tipo"))
                     except Exception as e:
                         logger.warning("chat: aurora extraction failed: %s", e)
+                    try:
+                        from app.semantic_extractor import extract_semantic_facts
+
+                        facts = await asyncio.to_thread(
+                            extract_semantic_facts, latest_user_message, final_reply
+                        )
+                        for f in facts:
+                            await store_semantic_memory(
+                                user_id=user_id,
+                                key=f["key"],
+                                content=f["content"],
+                                importance=f["importance"],
+                            )
+                        if facts:
+                            logger.info("chat: %d semantic fact(s) stored", len(facts))
+                    except Exception as e:
+                        logger.warning("chat: semantic extraction failed: %s", e)
 
                 asyncio.create_task(_persist())
 

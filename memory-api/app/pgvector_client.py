@@ -307,6 +307,24 @@ async def store_semantic(
         return str(row["id"])
 
 
+async def get_top_semantic_facts(
+    user_id: str | None = None,
+    top_k: int = 5,
+) -> list[dict]:
+    """Return a user's most important profile facts (no query — the durable profile)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT id, user_id, key, content, importance, updated_at
+               FROM semantic_memory
+               WHERE ($1::text IS NULL OR user_id = $1)
+               ORDER BY importance DESC, updated_at DESC
+               LIMIT $2""",
+            user_id, top_k,
+        )
+        return [_serialize_row(r) for r in rows]
+
+
 async def search_semantic(
     embedding: list[float],
     user_id: str | None = None,
