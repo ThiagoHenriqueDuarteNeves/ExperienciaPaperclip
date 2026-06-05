@@ -4,6 +4,8 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+*.log
+zrok-tunnel.log
 .env
 .env.local
 .env.*.local
