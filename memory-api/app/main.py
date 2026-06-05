@@ -6,9 +6,8 @@ import math
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
 
 from app.chat_pipeline import build_system, recall_and_build_system
 from app.chroma_client import health as chroma_health
@@ -53,14 +52,8 @@ except ImportError:
     def extract_aurora(*args, **kwargs) -> dict | None:
         return None
 
-# Phase 4: multi-user auth
-from app.auth import (
-    hash_pin,
-    issue_token,
-    user_from_authorization,
-    verify_pin,
-)
-from app.pgvector_client import create_user_profile, get_user_profile
+# Phase 4: multi-user auth (auth routes live in app.routers.auth; chat needs this one)
+from app.auth import user_from_authorization
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -178,7 +171,7 @@ except ImportError:
 _CONVERSATION_LOOP_AVAILABLE = False
 
 
-limiter = Limiter(key_func=get_remote_address)
+from app.rate_limit import limiter  # noqa: E402
 
 app = FastAPI(title="Episodic, Semantic & Procedural Memory API", version="0.4.0-phase1")
 app.state.limiter = limiter
@@ -192,10 +185,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Memory inspector (local debug tool). Endpoints self-gate on settings.inspect_enabled.
+# Routers split by domain (Fase 2.2). Inspector self-gates on settings.inspect_enabled.
 from app.inspect_api import router as inspect_router  # noqa: E402
+from app.routers.auth import router as auth_router  # noqa: E402
 
 app.include_router(inspect_router)
+app.include_router(auth_router)
 
 
 # Request / Response models live in app.schemas (extracted for SRP).
@@ -212,11 +207,9 @@ from app.schemas import (  # noqa: E402
     EnrichedSearchRequest,
     GraphQueryRequest,
     GraphSearchRequest,
-    LoginRequest,
     MemoryItem,
     MessageSearchRequest,
     MessageStoreRequest,
-    RegisterRequest,
     RetrieveRequest,
     RetrieveResponse,
     SemanticSearchRequest,
@@ -674,51 +667,6 @@ async def conversation_endpoint(req: ConversationRequest):
         status_code=501,
         content={"detail": "Conversation loop not yet implemented"},
     )
-
-
-# ---------------------------------------------------------------------------
-# Auth — multi-user profiles with server-validated PIN
-# ---------------------------------------------------------------------------
-
-
-@app.post("/auth/register")
-@limiter.limit("5/minute")
-async def auth_register_endpoint(request: Request, req: RegisterRequest):
-    existing = await get_user_profile(req.user_id)
-    if existing is not None:
-        raise HTTPException(status_code=409, detail="user_id already taken")
-    pin_hash, pin_salt = hash_pin(req.pin)
-    display_name = req.display_name or req.user_id
-    await create_user_profile(req.user_id, display_name, pin_hash, pin_salt)
-    logger.info("auth: registered user_id=%s", req.user_id)
-    token = issue_token(req.user_id)
-    return {"token": token, "user_id": req.user_id, "display_name": display_name}
-
-
-@app.post("/auth/login")
-@limiter.limit("6/minute")
-async def auth_login_endpoint(request: Request, req: LoginRequest):
-    profile = await get_user_profile(req.user_id)
-    if profile is None or not verify_pin(req.pin, profile["pin_hash"], profile["pin_salt"]):
-        raise HTTPException(status_code=401, detail="invalid credentials")
-    token = issue_token(req.user_id)
-    return {
-        "token": token,
-        "user_id": req.user_id,
-        "display_name": profile.get("display_name") or req.user_id,
-    }
-
-
-@app.get("/auth/me")
-async def auth_me_endpoint(request: Request):
-    user_id = user_from_authorization(request.headers.get("authorization"))
-    if user_id is None:
-        raise HTTPException(status_code=401, detail="invalid or missing token")
-    profile = await get_user_profile(user_id)
-    return {
-        "user_id": user_id,
-        "display_name": (profile or {}).get("display_name") or user_id,
-    }
 
 
 # ---------------------------------------------------------------------------
