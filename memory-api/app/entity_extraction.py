@@ -38,8 +38,14 @@ If nothing meaningful can be extracted, return {"entities": [], "relationships":
 """
 
 
-def extract_knowledge(text: str) -> dict:
-    """Extract entities and relationships from text using Claude."""
+def extract_knowledge(text: str, timeout: float = 30.0) -> dict:
+    """Extract entities and relationships from text using the LLM.
+
+    `timeout` is the per-attempt HTTP timeout. Slow local models (e.g. LM Studio)
+    may need a larger value; batch reprocessing passes a higher timeout so a
+    genuinely slow document succeeds on the first attempt instead of burning
+    multiple short retries.
+    """
     api_key = settings.effective_claude_api_key
     if not api_key:
         logger.warning("entity_extraction: no API key configured, skipping extraction")
@@ -49,7 +55,7 @@ def extract_knowledge(text: str) -> dict:
 
     for attempt in range(settings.max_extraction_retries + 1):
         try:
-            content_text = complete_text(messages, max_tokens=2048)
+            content_text = complete_text(messages, max_tokens=2048, timeout=timeout)
             return _parse_extraction(content_text)
 
         except LLMError as exc:
