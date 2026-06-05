@@ -18,13 +18,28 @@ from __future__ import annotations
 import argparse
 import asyncio
 
-from app.chroma_client import get_or_create_collection
 from app.pgvector_client import get_pool
 from app.semantic_extractor import extract_semantic_facts
 from app.semantic_store import store_semantic_memory
 
 
+def _split_turn(doc: str) -> tuple[str, str]:
+    """Split a stored episodic doc ('User: X\\nAssistant: Y') into (user, assistant).
+
+    Avoids feeding the whole doc as the user message with an empty reply, which
+    would double the speaker labels in the extraction prompt.
+    """
+    marker = "\nAssistant:"
+    if marker in doc:
+        user_part, assistant_part = doc.split(marker, 1)
+        user_part = user_part.split("User:", 1)[-1].strip()
+        return user_part, assistant_part.strip()
+    return doc.strip(), ""
+
+
 def _fetch(user_id: str | None, limit: int | None) -> list[tuple[str, str]]:
+    from app.chroma_client import get_or_create_collection
+
     collection = get_or_create_collection()
     where = {"user_id": user_id} if user_id else None
     res = collection.get(where=where, include=["documents", "metadatas"])
@@ -62,7 +77,8 @@ async def backfill(dry_run: bool, limit: int | None, user_id: str | None, timeou
         if not owner:
             continue
         try:
-            facts = await asyncio.to_thread(extract_semantic_facts, text, "")
+            user_part, assistant_part = _split_turn(text)
+            facts = await asyncio.to_thread(extract_semantic_facts, user_part, assistant_part)
         except Exception as exc:
             failed += 1
             print(f"[{i}/{len(items)}] EXTRACTION FAILED: {exc}")

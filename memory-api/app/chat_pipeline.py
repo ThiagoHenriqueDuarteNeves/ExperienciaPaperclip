@@ -195,8 +195,12 @@ def assemble_memory_context(
     if identity:
         parts.append("\n".join(f.get("content", "") for f in identity))
 
+    # Gate the EPISODIC layer (pure vector) by cosine relevance. Do NOT gate the
+    # conversation layer: it comes from hybrid (RRF) search, already relevance-ranked
+    # and top_k-bounded — cosine-gating it would discard strong BM25/exact-term
+    # matches whose vector similarity happens to be low (regressing exact recall).
     episodic = _gate(layers.get("episodic") or [], min_similarity)
-    conversation = _gate(layers.get("conversation") or [], min_similarity)
+    conversation = layers.get("conversation") or []
     all_mems = merge_and_dedup(episodic, conversation)
     if rerank and query:
         from app.reranker import rerank_memories

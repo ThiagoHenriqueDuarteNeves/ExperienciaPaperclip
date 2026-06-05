@@ -69,6 +69,9 @@ class Settings(BaseSettings):
     recall_rerank_top_n: int = 6
     recall_rerank_candidate_k: int = 12
     recall_rerank_model: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
+    # Skip live semantic-fact extraction for user turns shorter than this (avoids
+    # an LLM call on trivial acks like "ok"/"kkkk"). Backfill covers the history.
+    chat_semantic_min_chars: int = 30
 
     letta_base_url: str = "http://letta:8283"
     letta_api_key: str = ""

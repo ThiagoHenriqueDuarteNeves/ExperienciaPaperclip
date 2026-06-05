@@ -98,3 +98,16 @@ def test_assemble_defaults_keep_old_behavior():
     # No thresholds -> nothing gated/budgeted (back-compat for callers).
     layers = {"episodic": [{"content": "kept", "similarity": 0.1}], "conversation": []}
     assert "kept" in cp.assemble_memory_context(layers)
+
+
+def test_conversation_hybrid_hit_survives_gate_but_episodic_is_gated():
+    # The exact-term (BM25) case: a conversation hit with LOW vector similarity
+    # must NOT be gated (hybrid search already ranked it), while a low-similarity
+    # EPISODIC hit (pure vector) is gated out.
+    layers = {
+        "episodic": [{"content": "EPISODIC_WEAK", "similarity": 0.30}],
+        "conversation": [{"content": "BM25_EXACT_MATCH", "similarity": 0.40}],
+    }
+    ctx = cp.assemble_memory_context(layers, min_similarity=0.7, char_budget=10_000)
+    assert "BM25_EXACT_MATCH" in ctx      # hybrid hit kept despite low cosine
+    assert "EPISODIC_WEAK" not in ctx     # pure-vector weak hit gated

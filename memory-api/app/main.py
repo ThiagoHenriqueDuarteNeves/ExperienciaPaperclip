@@ -635,20 +635,25 @@ async def api_chat_endpoint(request: Request):
                     except Exception as e:
                         logger.warning("chat: aurora extraction failed: %s", e)
                     try:
+                        from app.config import settings
                         from app.semantic_extractor import extract_semantic_facts
 
-                        facts = await asyncio.to_thread(
-                            extract_semantic_facts, latest_user_message, final_reply
-                        )
-                        for f in facts:
-                            await store_semantic_memory(
-                                user_id=user_id,
-                                key=f["key"],
-                                content=f["content"],
-                                importance=f["importance"],
+                        # Skip trivial turns ("ok", "kkkk", "valeu"…) — they rarely
+                        # carry durable facts, so don't spend an LLM call on them.
+                        min_chars = getattr(settings, "chat_semantic_min_chars", 30)
+                        if len((latest_user_message or "").strip()) >= min_chars:
+                            facts = await asyncio.to_thread(
+                                extract_semantic_facts, latest_user_message, final_reply
                             )
-                        if facts:
-                            logger.info("chat: %d semantic fact(s) stored", len(facts))
+                            for f in facts:
+                                await store_semantic_memory(
+                                    user_id=user_id,
+                                    key=f["key"],
+                                    content=f["content"],
+                                    importance=f["importance"],
+                                )
+                            if facts:
+                                logger.info("chat: %d semantic fact(s) stored", len(facts))
                     except Exception as e:
                         logger.warning("chat: semantic extraction failed: %s", e)
 
