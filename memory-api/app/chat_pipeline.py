@@ -146,7 +146,7 @@ async def recall_layers(
     # helpers above stay importable without them (e.g. in unit tests).
     from app.conversation_store import search_hybrid as search_conversations
     from app.retrieval import retrieve_similar
-    from app.semantic_store import get_profile_facts
+    from app.semantic_store import get_identity_facts
 
     try:
         from app.aurora_store import search_aurora_memories
@@ -162,7 +162,7 @@ async def recall_layers(
     episodic, convo, identity, aurora = await asyncio.gather(
         asyncio.to_thread(retrieve_similar, message, user_id, episodic_k),
         search_conversations(query=message, top_k=convo_k, user_id=user_id),
-        get_profile_facts(user_id=user_id, top_k=identity_k),
+        get_identity_facts(user_id=user_id, query=message, top_k=identity_k),
         search_aurora_memories(query=message, user_id=user_id, top_k=aurora_k),
     )
     return {

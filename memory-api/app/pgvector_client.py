@@ -307,6 +307,18 @@ async def store_semantic(
         return str(row["id"])
 
 
+async def get_semantic_fact_by_key(user_id: str, key: str) -> dict | None:
+    """Fetch a single profile fact by its canonical key (e.g. 'nome')."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT id, user_id, key, content, importance
+               FROM semantic_memory WHERE user_id = $1 AND key = $2""",
+            user_id, key,
+        )
+        return _serialize_row(row) if row else None
+
+
 async def get_top_semantic_facts(
     user_id: str | None = None,
     top_k: int = 5,
