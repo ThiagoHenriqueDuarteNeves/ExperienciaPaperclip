@@ -1,8 +1,32 @@
+import json
+
 from neo4j import GraphDatabase, Driver
 
 from app.config import settings
 
 _driver: Driver | None = None
+
+
+def _props_to_storage(properties: dict | None) -> str:
+    """Serialize relationship properties for Neo4j storage.
+
+    Neo4j property values must be primitives or arrays of primitives — a nested
+    map (e.g. {"duration": "12 anos"}) is rejected with a 22N01 type error. We
+    therefore store the whole properties bag as a JSON string.
+    """
+    return json.dumps(properties or {})
+
+
+def _props_from_storage(value) -> dict:
+    """Inverse of _props_to_storage. Tolerant of legacy/plain values."""
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except (ValueError, TypeError):
+            return {}
+    if isinstance(value, dict):
+        return value
+    return {}
 
 
 def get_driver() -> Driver:
@@ -135,6 +159,7 @@ def upsert_relationship(
 ) -> dict | None:
     """Create or update a directed relationship between two entities."""
     driver = get_driver()
+    properties_json = _props_to_storage(properties)
     with driver.session() as session:
         for name in (source_name, target_name):
             session.run(
@@ -154,18 +179,21 @@ def upsert_relationship(
             MATCH (a:Entity {name: $source})
             MATCH (b:Entity {name: $target})
             MERGE (a)-[r:RELATES_TO {type: $rel_type}]->(b)
-            ON CREATE SET r.created_at = datetime(), r.properties = $properties
-            ON MATCH SET r.properties = CASE WHEN $properties IS NOT NULL
-                THEN $properties ELSE r.properties END
+            ON CREATE SET r.created_at = datetime(), r.properties = $properties_json
+            ON MATCH SET r.properties = $properties_json
             RETURN r.type AS type, r.properties AS properties
             """,
             source=source_name,
             target=target_name,
             rel_type=rel_type,
-            properties=properties or {},
+            properties_json=properties_json,
         )
         record = result.single()
-        return dict(record) if record else None
+        if record is None:
+            return None
+        out = dict(record)
+        out["properties"] = _props_from_storage(out.get("properties"))
+        return out
 
 
 def get_relationships(
@@ -197,7 +225,12 @@ def get_relationships(
         """
         params["rel_type"] = rel_type
         result = session.run(cypher, params)
-        return [dict(r) for r in result]
+        rels = []
+        for r in result:
+            d = dict(r)
+            d["properties"] = _props_from_storage(d.get("properties"))
+            rels.append(d)
+        return rels
 
 
 def find_connected_entities(
