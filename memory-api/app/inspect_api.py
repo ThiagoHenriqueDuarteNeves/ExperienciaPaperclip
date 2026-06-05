@@ -5,20 +5,25 @@ would send to the LLM for a given prompt, and (2) freely browse what is stored
 in every memory bank (pgvector conversations/semantic/aurora, ChromaDB episodic,
 Neo4j graph).
 
-Gated by settings.inspect_enabled (MEMORY_INSPECT_ENABLED=true) so it is never
-reachable through the public zrok share unless explicitly turned on locally.
+Access control:
+- Gated by settings.inspect_enabled (MEMORY_INSPECT_ENABLED=true). When off, every
+  endpoint 404s so the feature isn't advertised.
+- The web page (GET /inspect) is the login UI and needs no token.
+- Every DATA endpoint requires an authenticated **admin** session token (a profile
+  with is_admin=TRUE). This is what makes it safe to expose via the zrok share.
 """
 
 from __future__ import annotations
 
 import os
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import FileResponse
 
+from app.auth import user_from_authorization
 from app.chat_pipeline import recall_and_build_system
 from app.config import settings
-from app.pgvector_client import _serialize_row, get_pool
+from app.pgvector_client import _serialize_row, get_pool, get_user_profile
 
 router = APIRouter(prefix="/inspect", tags=["inspect"])
 
@@ -31,6 +36,22 @@ def _guard() -> None:
     if not getattr(settings, "inspect_enabled", False):
         # 404 (not 403) so the feature's existence isn't advertised when off.
         raise HTTPException(status_code=404, detail="Not Found")
+
+
+async def require_admin(authorization: str | None = Header(default=None)) -> str:
+    """Dependency for inspector data endpoints: enabled + valid admin token.
+
+    Returns the admin user_id, or raises. 404 when disabled (don't advertise),
+    401 without a valid token, 403 when the token's user isn't an admin.
+    """
+    _guard()
+    user_id = user_from_authorization(authorization)
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="authentication required")
+    profile = await get_user_profile(user_id)
+    if not profile or not profile.get("is_admin"):
+        raise HTTPException(status_code=403, detail="admin access required")
+    return user_id
 
 
 # ---------------------------------------------------------------------------
@@ -49,9 +70,8 @@ def inspect_page():
 # ---------------------------------------------------------------------------
 
 
-@router.get("/overview")
+@router.get("/overview", dependencies=[Depends(require_admin)])
 async def overview():
-    _guard()
     pool = await get_pool()
     async with pool.acquire() as conn:
         counts = await conn.fetchrow(
@@ -98,11 +118,10 @@ async def overview():
 # ---------------------------------------------------------------------------
 
 
-@router.post("/recall")
+@router.post("/recall", dependencies=[Depends(require_admin)])
 async def recall_preview(body: dict):
     """Given {prompt, user_id}, return the exact recall + system payload that the
     chat pipeline would send to the LLM — WITHOUT calling the LLM."""
-    _guard()
     prompt = (body.get("prompt") or "").strip()
     user_id = body.get("user_id") or None
     if not prompt:
@@ -133,13 +152,12 @@ async def recall_preview(body: dict):
 # ---------------------------------------------------------------------------
 
 
-@router.get("/bank/conversations")
+@router.get("/bank/conversations", dependencies=[Depends(require_admin)])
 async def bank_conversations(
     user_id: str | None = Query(default=None),
     q: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=500),
 ):
-    _guard()
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -154,13 +172,12 @@ async def bank_conversations(
     return {"rows": [_serialize_row(r) for r in rows], "count": len(rows)}
 
 
-@router.get("/bank/semantic")
+@router.get("/bank/semantic", dependencies=[Depends(require_admin)])
 async def bank_semantic(
     user_id: str | None = Query(default=None),
     q: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=500),
 ):
-    _guard()
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -175,13 +192,12 @@ async def bank_semantic(
     return {"rows": [_serialize_row(r) for r in rows], "count": len(rows)}
 
 
-@router.get("/bank/aurora")
+@router.get("/bank/aurora", dependencies=[Depends(require_admin)])
 async def bank_aurora(
     user_id: str | None = Query(default=None),
     q: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=500),
 ):
-    _guard()
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -200,13 +216,12 @@ async def bank_aurora(
     return {"rows": [_serialize_row(r) for r in rows], "count": len(rows)}
 
 
-@router.get("/bank/episodic")
+@router.get("/bank/episodic", dependencies=[Depends(require_admin)])
 async def bank_episodic(
     user_id: str | None = Query(default=None),
     q: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=500),
 ):
-    _guard()
     try:
         from app.chroma_client import get_or_create_collection
 
@@ -231,13 +246,12 @@ async def bank_episodic(
     return {"rows": rows, "count": len(rows)}
 
 
-@router.get("/bank/graph")
+@router.get("/bank/graph", dependencies=[Depends(require_admin)])
 async def bank_graph(
     q: str | None = Query(default=None),
     entity: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=500),
 ):
-    _guard()
     try:
         from app.kg_retrieval import get_entity_graph
         from app.neo4j_client import search_entities

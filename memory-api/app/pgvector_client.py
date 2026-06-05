@@ -521,7 +521,8 @@ async def get_user_profile(user_id: str) -> dict | None:
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            """SELECT user_id, display_name, pin_hash, pin_salt, created_at
+            """SELECT user_id, display_name, pin_hash, pin_salt, created_at,
+                      COALESCE(is_admin, FALSE) AS is_admin
                FROM user_profiles WHERE user_id = $1""",
             user_id,
         )

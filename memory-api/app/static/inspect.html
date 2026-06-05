@@ -57,6 +57,23 @@
 </style>
 </head>
 <body>
+
+<!-- LOGIN OVERLAY -->
+<div id="loginOverlay" style="display:none; position:fixed; inset:0; z-index:50;
+     background:var(--bg); align-items:center; justify-content:center;">
+  <div class="card" style="width:340px; max-width:90vw; margin:0">
+    <h2>🔒 Acesso restrito (admin)</h2>
+    <p class="hint">O inspetor expõe todas as memórias. Entre com uma conta <b>admin</b>.</p>
+    <div style="display:flex; flex-direction:column; gap:10px; margin-top:6px">
+      <input id="loginUser" placeholder="user_id" autocomplete="username" />
+      <input id="loginPin" type="password" placeholder="PIN" autocomplete="current-password" />
+      <button id="loginBtn">Entrar</button>
+      <div id="loginErr" class="err" style="font-size:12px; min-height:16px"></div>
+    </div>
+  </div>
+</div>
+
+<div id="app" style="display:none">
 <header>
   <h1>🔍 Memory Inspector</h1>
   <div class="row">
@@ -65,6 +82,7 @@
     <datalist id="users"></datalist>
   </div>
   <div id="overview" class="badges muted">carregando…</div>
+  <button class="ghost" style="margin-left:auto" onclick="logout()">Sair</button>
 </header>
 
 <div class="wrap">
@@ -94,6 +112,7 @@
   </div>
 
 </div>
+</div><!-- /#app -->
 
 <script>
 const BANKS = [
@@ -106,11 +125,32 @@ const BANKS = [
 let activeBank = "conversations";
 
 const $ = (id) => document.getElementById(id);
-const esc = (s) => String(s ?? "").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+// Escapes &<>"' so untrusted strings (LLM-extracted entity names, user content)
+// are safe in BOTH text and attribute contexts.
+const ESC_MAP = {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"};
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ESC_MAP[c]);
 const userId = () => $("user").value.trim();
 
+// --- auth (admin token) ---
+const TOKEN_KEY = "inspect_admin_token";
+const getToken = () => localStorage.getItem(TOKEN_KEY) || "";
+const setToken = (t) => localStorage.setItem(TOKEN_KEY, t);
+const clearToken = () => localStorage.removeItem(TOKEN_KEY);
+
 async function api(path, opts) {
-  const r = await fetch(path, opts);
+  opts = opts || {};
+  const headers = Object.assign({}, opts.headers || {});
+  const tok = getToken();
+  if (tok) headers["Authorization"] = "Bearer " + tok;
+  const r = await fetch(path, Object.assign({}, opts, { headers }));
+  if (r.status === 401 || r.status === 403) {
+    // Token missing/expired or not an admin → force re-login.
+    clearToken();
+    showLogin(r.status === 403
+      ? "Esta conta não é admin. Entre com uma conta admin."
+      : "Sessão expirada. Entre novamente.");
+    throw new Error(r.status === 403 ? "admin access required" : "authentication required");
+  }
   if (!r.ok) {
     let d = `HTTP ${r.status}`;
     try { d = (await r.json()).detail || d; } catch {}
@@ -235,7 +275,8 @@ async function loadBank() {
       ]);
     } else if (activeBank === "graph") {
       out = `<p class="hint">Clique numa entidade para ver a vizinhança.</p>` + table(rows, [
-        ["entidade", x => `<a href="#" onclick="graphEntity('${esc(x.name)}');return false" style="color:var(--accent)">${esc(x.name)}</a>`],
+        // data-entity (escaped) + delegated handler — never inject the name into JS/onclick.
+        ["entidade", x => `<a href="#" class="entity-link" data-entity="${esc(x.name)}" style="color:var(--accent)">${esc(x.name)}</a>`],
         ["tipo", x => `<span class="pill">${esc(x.type)}</span>`],
         ["descrição", x => esc(x.description), "content"],
       ]);
@@ -259,11 +300,68 @@ async function graphEntity(name) {
   }
 }
 
-// init
-renderTabs();
-loadOverview();
-loadBank();
+// Delegated handler for entity drill-down links (no inline JS → no injection).
+$("bankOut").addEventListener("click", e => {
+  const a = e.target.closest(".entity-link");
+  if (!a) return;
+  e.preventDefault();
+  graphEntity(a.dataset.entity);
+});
+
+// --- login flow ---
+function showLogin(msg) {
+  $("app").style.display = "none";
+  $("loginOverlay").style.display = "flex";
+  $("loginErr").textContent = msg || "";
+  $("loginUser").focus();
+}
+function hideLogin() {
+  $("loginOverlay").style.display = "none";
+  $("app").style.display = "";
+}
+async function doLogin() {
+  const user_id = $("loginUser").value.trim();
+  const pin = $("loginPin").value;
+  if (!user_id || !pin) { $("loginErr").textContent = "Informe user_id e PIN."; return; }
+  $("loginErr").textContent = "";
+  $("loginBtn").disabled = true;
+  try {
+    // Don't use api() here (it would redirect to login on 401 mid-login).
+    const r = await fetch("/auth/login", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ user_id, pin }),
+    });
+    if (!r.ok) {
+      let d = `HTTP ${r.status}`;
+      try { d = (await r.json()).detail || d; } catch {}
+      throw new Error(d);
+    }
+    const data = await r.json();
+    setToken(data.token);
+    $("loginPin").value = "";
+    hideLogin();
+    init();
+  } catch (e) {
+    $("loginErr").textContent = e.message;
+  } finally {
+    $("loginBtn").disabled = false;
+  }
+}
+function logout() { clearToken(); showLogin("Você saiu."); }
+
+// init (app) — only runs once authenticated.
+function init() {
+  renderTabs();
+  loadOverview();
+  loadBank();
+}
 $("prompt").addEventListener("keydown", e => { if (e.key==="Enter" && (e.ctrlKey||e.metaKey)) doRecall(); });
+$("loginBtn").addEventListener("click", doLogin);
+$("loginPin").addEventListener("keydown", e => { if (e.key==="Enter") doLogin(); });
+$("loginUser").addEventListener("keydown", e => { if (e.key==="Enter") $("loginPin").focus(); });
+
+// Boot: if we have a token, try the app; otherwise show login.
+if (getToken()) { hideLogin(); init(); } else { showLogin(); }
 </script>
 </body>
 </html>

@@ -102,8 +102,9 @@ services:
       - MEMORY_LETTA_BASE_URL=http://letta:8283
       - MEMORY_LETTA_API_KEY=${LETTA_API_KEY:-letta-local-dev-key}
       - MEMORY_AUTH_SECRET=${MEMORY_AUTH_SECRET:-dev-insecure-auth-secret-change-me}
-      # Local memory inspector (/inspect). OFF by default; set INSPECT_ENABLED=true
-      # in .env to enable locally. Keep OFF for the zrok-exposed instance.
+      # Memory inspector (/inspect). OFF by default; set INSPECT_ENABLED=true in
+      # .env to enable. Data endpoints require an admin token (is_admin profile),
+      # so it's safe to expose via zrok — but only enable where you need it.
       - MEMORY_INSPECT_ENABLED=${INSPECT_ENABLED:-false}
       - MEMORY_LLM_PROVIDER=${LLM_PROVIDER:-anthropic}
       # LLM endpoint (Anthropic-Messages-compatible). Leave LLM_API_BASE empty to
