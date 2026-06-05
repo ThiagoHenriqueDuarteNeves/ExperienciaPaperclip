@@ -58,6 +58,10 @@ _RECALL_DEFAULTS = {
     "aurora_k": 3,
     "min_similarity": 0.7,
     "char_budget": 6000,
+    # Fase C — cross-encoder re-ranking (opt-in).
+    "rerank_enabled": False,
+    "rerank_top_n": 6,
+    "rerank_candidate_k": 12,
 }
 
 
@@ -174,12 +178,16 @@ def assemble_memory_context(
     *,
     min_similarity: float = 0.0,
     char_budget: int | None = None,
+    query: str | None = None,
+    rerank: bool = False,
+    rerank_top_n: int = 6,
 ) -> str:
     """Turn recalled layers into the memory-context text block.
 
     Curates rather than dumps: gates episodic/conversation by relevance, merges
-    and de-duplicates the overlap, and trims to a character budget. Identity and
-    Aurora are kept (they are small / already top-k bounded).
+    and de-duplicates the overlap, optionally cross-encoder re-ranks against the
+    query (Fase C), and trims to a character budget. Identity and Aurora are kept
+    (they are small / already top-k bounded).
     """
     parts: list[str] = []
 
@@ -189,7 +197,12 @@ def assemble_memory_context(
 
     episodic = _gate(layers.get("episodic") or [], min_similarity)
     conversation = _gate(layers.get("conversation") or [], min_similarity)
-    all_mems = apply_budget(merge_and_dedup(episodic, conversation), char_budget)
+    all_mems = merge_and_dedup(episodic, conversation)
+    if rerank and query:
+        from app.reranker import rerank_memories
+
+        all_mems = rerank_memories(query, all_mems, rerank_top_n)
+    all_mems = apply_budget(all_mems, char_budget)
     if all_mems:
         parts.append(
             "\n".join(
@@ -232,11 +245,20 @@ async def recall_and_build_system(
     Returns (layers, memory_context, system). Used by the inspector to show the
     exact payload; the chat endpoint composes the same pieces inline.
     """
-    layers = await recall_layers(user_id, message)
+    rerank = bool(_cfg("rerank_enabled"))
+    if rerank:
+        # over-fetch candidates so the re-ranker has a real pool to choose from
+        k = _cfg("rerank_candidate_k")
+        layers = await recall_layers(user_id, message, episodic_k=k, convo_k=k)
+    else:
+        layers = await recall_layers(user_id, message)
     memory_context = assemble_memory_context(
         layers,
         min_similarity=_cfg("min_similarity"),
         char_budget=_cfg("char_budget"),
+        query=message,
+        rerank=rerank,
+        rerank_top_n=_cfg("rerank_top_n"),
     )
     system = build_system(memory_context)
     return layers, memory_context, system
