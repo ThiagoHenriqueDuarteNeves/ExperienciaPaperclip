@@ -239,7 +239,8 @@ async def bank_graph(
 ):
     _guard()
     try:
-        from app.neo4j_client import get_entity_graph, search_entities
+        from app.kg_retrieval import get_entity_graph
+        from app.neo4j_client import search_entities
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Neo4j unavailable: {exc}")
 
@@ -248,7 +249,11 @@ async def bank_graph(
         graph = get_entity_graph(entity, depth=2)
         if graph is None:
             raise HTTPException(status_code=404, detail=f"entity '{entity}' not found")
-        return graph
+        # Neo4j temporal types (created_at/updated_at) aren't JSON-serializable;
+        # round-trip through str to make the whole payload safe.
+        import json
+
+        return json.loads(json.dumps(graph, default=str))
 
     entities = search_entities(query=q or "", limit=limit)
     return {"rows": entities, "count": len(entities)}

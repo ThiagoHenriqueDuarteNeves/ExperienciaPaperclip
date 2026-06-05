@@ -238,12 +238,15 @@ def find_connected_entities(
     max_depth: int = 2,
 ) -> list[dict]:
     """BFS traversal to find entities connected within max_depth hops."""
+    # Neo4j forbids a parameter as the upper bound of a variable-length pattern,
+    # so the (validated, clamped) int is inlined as a literal.
+    depth = max(1, min(int(max_depth), 10))
     driver = get_driver()
     with driver.session() as session:
         result = session.run(
-            """
-            MATCH path = (a:Entity {name: $name})
-                        -[r:RELATES_TO*1..$max_depth]-(b:Entity)
+            f"""
+            MATCH path = (a:Entity {{name: $name}})
+                        -[r:RELATES_TO*1..{depth}]-(b:Entity)
             WHERE a <> b
             RETURN DISTINCT
                 b.name AS name,
@@ -254,7 +257,6 @@ def find_connected_entities(
             LIMIT 100
             """,
             name=entity_name,
-            max_depth=max_depth,
         )
         return [dict(r) for r in result]
 
@@ -264,11 +266,12 @@ def associative_retrieval(
     max_depth: int = 3,
 ) -> list[dict]:
     """Find subgraphs connecting multiple query entities."""
+    depth = max(1, min(int(max_depth), 10))  # literal upper bound (see above)
     driver = get_driver()
     with driver.session() as session:
         result = session.run(
-            """
-            MATCH path = (a:Entity)-[r:RELATES_TO*1..$max_depth]-(b:Entity)
+            f"""
+            MATCH path = (a:Entity)-[r:RELATES_TO*1..{depth}]-(b:Entity)
             WHERE a.name IN $entities
               AND b.name IN $entities
               AND a <> b
@@ -279,6 +282,5 @@ def associative_retrieval(
             LIMIT 50
             """,
             entities=query_entities,
-            max_depth=max_depth,
         )
         return [dict(r) for r in result]
