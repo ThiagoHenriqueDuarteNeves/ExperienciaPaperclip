@@ -323,9 +323,11 @@ export function MarkdownRenderer({ content }: { content: string }) {
     <div style={{ fontSize: 14.5, lineHeight: 1.65, color: "var(--text)" }}>
       {segments.map((seg, i) =>
         seg.type === "code" ? (
-          <CodeBlock key={i} lang={seg.lang} content={seg.content} />
+          // Key on type+content so a CodeBlock's copied state can't bleed to a
+          // different block if segment indices shift.
+          <CodeBlock key={`c${i}:${seg.content.length}`} lang={seg.lang} content={seg.content} />
         ) : (
-          <TextSegment key={i} content={seg.content} />
+          <TextSegment key={`t${i}`} content={seg.content} />
         )
       )}
     </div>
