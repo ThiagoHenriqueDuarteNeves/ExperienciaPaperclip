@@ -299,8 +299,10 @@ async def store_semantic(
             """INSERT INTO semantic_memory (user_id, key, content, embedding, importance)
                VALUES ($1, $2, $3, $4::vector, $5)
                ON CONFLICT (user_id, key)
-               DO UPDATE SET content = $3, embedding = $4::vector,
-                             importance = $5, updated_at = NOW()
+               DO UPDATE SET content = EXCLUDED.content,
+                             embedding = EXCLUDED.embedding,
+                             importance = GREATEST(semantic_memory.importance, EXCLUDED.importance),
+                             updated_at = NOW()
                RETURNING id""",
             user_id, key, content, vec, importance,
         )

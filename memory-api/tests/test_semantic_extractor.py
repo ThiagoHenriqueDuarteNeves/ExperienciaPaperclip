@@ -57,3 +57,33 @@ def test_non_list_returns_empty():
 def test_caps_at_ten_facts():
     items = ",".join(f'{{"key":"k{i}","content":"c"}}' for i in range(20))
     assert len(se._parse_facts(f"[{items}]")) == 10
+
+
+# ---------------------------------------------------------------------------
+# Key alias collapsing
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("variant,canonical", [
+    ("profissao_atual", "profissao"),
+    ("trabalho_atual",  "profissao"),
+    ("emprego_atual",   "profissao"),
+    ("cargo_atual",     "profissao"),
+    ("nome_completo",   "nome"),
+    ("primeiro_nome",   "nome"),
+    ("nome_usuario",    "nome"),
+])
+def test_key_aliases_collapsed_to_canonical(variant, canonical):
+    out = se._parse_facts(f'[{{"key":"{variant}","content":"x"}}]')
+    assert out[0]["key"] == canonical
+
+
+def test_profissao_atual_deduped_against_profissao():
+    """Two keys that both normalise to 'profissao' must produce only one fact."""
+    out = se._parse_facts(
+        '[{"key":"profissao","content":"QA"},{"key":"profissao_atual","content":"QA Senior"}]'
+    )
+    assert len(out) == 1
+    assert out[0]["key"] == "profissao"
+    # first occurrence wins (canonical "profissao" came first)
+    assert out[0]["content"] == "QA"

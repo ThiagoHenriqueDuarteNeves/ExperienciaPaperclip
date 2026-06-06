@@ -117,12 +117,28 @@ def _parse_facts(text: str) -> list[dict]:
     return facts[:10]
 
 
+# Canonical aliases: LLM sometimes generates these variants — collapse them to the
+# canonical key so they upsert the same row instead of creating a parallel fact.
+_KEY_ALIASES: dict[str, str] = {
+    "profissao_atual":  "profissao",
+    "trabalho_atual":   "profissao",
+    "emprego_atual":    "profissao",
+    "cargo_atual":      "profissao",
+    "nome_completo":    "nome",
+    "primeiro_nome":    "nome",
+    "nome_usuario":     "nome",
+}
+
+
 def _norm_key(value) -> str | None:
     if not isinstance(value, str):
         return None
     key = value.strip().lower().replace(" ", "_")
     key = "".join(c for c in key if c.isalnum() or c == "_")
-    return key[:512] or None
+    key = key[:512] or None
+    if key:
+        key = _KEY_ALIASES.get(key, key)
+    return key
 
 
 def _clamp_importance(value) -> float:
