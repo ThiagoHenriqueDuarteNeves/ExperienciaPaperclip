@@ -12,6 +12,29 @@ import {
 
 type Mode = { kind: "list" } | { kind: "pin"; profile: Profile } | { kind: "new" };
 
+const inputStyle: React.CSSProperties = {
+  width: "100%",
+  padding: "12px 14px",
+  borderRadius: 10,
+  border: "1.5px solid var(--border)",
+  background: "var(--surface-alt)",
+  color: "var(--text)",
+  fontSize: 16,
+  outline: "none",
+  transition: "border-color 0.15s",
+};
+
+const linkBtnStyle: React.CSSProperties = {
+  background: "none",
+  border: "none",
+  color: "var(--text-muted)",
+  fontSize: 13,
+  cursor: "pointer",
+  padding: "4px",
+  textAlign: "center",
+  letterSpacing: "0.01em",
+};
+
 export default function ProfileGate({
   onAuthenticated,
 }: {
@@ -47,8 +70,6 @@ export default function ProfileGate({
       onAuthenticated(s);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Falha ao criar";
-      // Profile already exists (e.g. a previous attempt registered but the
-      // response was lost). Self-heal: try logging in with the same name + PIN.
       if (msg.includes("taken") || msg.includes("409")) {
         try {
           const s = await login(slugify(name), pin);
@@ -65,107 +86,264 @@ export default function ProfileGate({
     }
   }
 
-  const card: React.CSSProperties = {
-    width: "100%", maxWidth: 360, display: "flex", flexDirection: "column",
-    gap: 14, padding: 24, borderRadius: 16, background: "var(--surface)",
-    border: "1px solid var(--border)", boxShadow: "var(--shadow-md)",
-  };
-  const input: React.CSSProperties = {
-    width: "100%", padding: "12px 14px", borderRadius: 10, fontSize: 16,
-    border: "1.5px solid var(--input-border)", background: "var(--input-bg)",
-    color: "var(--text)", outline: "none",
-  };
-  const primaryBtn: React.CSSProperties = {
-    width: "100%", padding: "12px", borderRadius: 10, border: "none",
-    background: "var(--btn-primary)", color: "#fff", fontSize: 15, fontWeight: 600,
-    cursor: "pointer", opacity: busy ? 0.6 : 1,
-  };
-  const linkBtn: React.CSSProperties = {
-    background: "none", border: "none", color: "var(--btn-primary)",
-    fontSize: 13, cursor: "pointer", padding: 4,
-  };
+  const subtitle =
+    mode.kind === "new"
+      ? "Criar perfil"
+      : mode.kind === "pin"
+      ? `Entrar como ${mode.profile.displayName}`
+      : "Quem é você?";
+
+  const canSubmitPin = !busy && pin.length >= 4;
+  const canSubmitNew = !busy && name.trim().length > 0 && pin.length >= 4;
+
+  function primaryBtnStyle(enabled: boolean): React.CSSProperties {
+    return {
+      width: "100%",
+      padding: "12px",
+      borderRadius: 10,
+      border: "none",
+      background: enabled ? "var(--accent)" : "var(--surface-alt)",
+      color: enabled ? "var(--bg)" : "var(--text-muted)",
+      fontSize: 15,
+      fontWeight: 600,
+      cursor: enabled ? "pointer" : "not-allowed",
+      transition: "all 0.15s",
+      letterSpacing: "-0.01em",
+    };
+  }
 
   return (
-    <div style={{
-      display: "flex", flexDirection: "column", alignItems: "center",
-      justifyContent: "center", height: "100dvh", padding: 20,
-      background: "var(--surface-alt)",
-    }}>
-      <div style={card}>
-        <div style={{ textAlign: "center" }}>
-          <div style={{ fontSize: 40 }}>🧠</div>
-          <h1 style={{ margin: "8px 0 2px", fontSize: 18, color: "var(--text)" }}>Memory Chat</h1>
-          <p style={{ margin: 0, fontSize: 12, color: "var(--text-muted)" }}>
-            {mode.kind === "new" ? "Criar um perfil" : mode.kind === "pin" ? `Entrar como ${mode.profile.displayName}` : "Quem é você?"}
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        height: "100dvh",
+        padding: 20,
+        background: "var(--bg)",
+      }}
+    >
+      <div
+        style={{
+          width: "100%",
+          maxWidth: 360,
+          display: "flex",
+          flexDirection: "column",
+          gap: 14,
+          padding: "28px 24px",
+          borderRadius: 18,
+          background: "var(--surface)",
+          border: "1px solid var(--border)",
+          boxShadow: "var(--shadow-lg)",
+          animation: "fadeSlide 0.25s ease-out",
+        }}
+      >
+        {/* Brand */}
+        <div style={{ textAlign: "center", marginBottom: 2 }}>
+          <div
+            style={{
+              width: 50,
+              height: 50,
+              borderRadius: 14,
+              background: "var(--accent-dim)",
+              border: "1px solid var(--accent-border)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontSize: 24,
+              margin: "0 auto 12px",
+            }}
+          >
+            🧠
+          </div>
+          <h1
+            style={{
+              margin: "0 0 3px",
+              fontSize: 20,
+              fontWeight: 700,
+              color: "var(--text)",
+              letterSpacing: "-0.03em",
+            }}
+          >
+            Memory Chat
+          </h1>
+          <p style={{ margin: 0, fontSize: 12.5, color: "var(--text-muted)" }}>
+            {subtitle}
           </p>
         </div>
 
+        {/* Profile list */}
         {mode.kind === "list" && (
           <>
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               {profiles.map((p) => (
                 <button
                   key={p.userId}
                   type="button"
-                  onClick={() => { setPin(""); setError(""); setMode({ kind: "pin", profile: p }); }}
+                  onClick={() => {
+                    setPin("");
+                    setError("");
+                    setMode({ kind: "pin", profile: p });
+                  }}
                   style={{
-                    display: "flex", alignItems: "center", gap: 10, padding: "12px 14px",
-                    borderRadius: 10, border: "1px solid var(--border)", background: "var(--surface-alt)",
-                    color: "var(--text)", fontSize: 15, cursor: "pointer", textAlign: "left",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 12,
+                    padding: "11px 14px",
+                    borderRadius: 10,
+                    border: "1px solid var(--border)",
+                    background: "var(--surface-alt)",
+                    color: "var(--text)",
+                    fontSize: 14.5,
+                    cursor: "pointer",
+                    textAlign: "left",
+                    transition: "background 0.12s, border-color 0.12s",
                   }}
                 >
-                  <span style={{ fontSize: 20 }}>👤</span> {p.displayName}
+                  <div
+                    style={{
+                      width: 30,
+                      height: 30,
+                      borderRadius: "50%",
+                      background: "var(--accent)",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      fontSize: 13,
+                      fontWeight: 700,
+                      color: "var(--bg)",
+                      flexShrink: 0,
+                      userSelect: "none",
+                    }}
+                  >
+                    {p.displayName.charAt(0).toUpperCase()}
+                  </div>
+                  {p.displayName}
                 </button>
               ))}
             </div>
-            <button type="button" style={linkBtn} onClick={() => { setName(""); setPin(""); setError(""); setMode({ kind: "new" }); }}>
+            <button
+              type="button"
+              onClick={() => {
+                setName("");
+                setPin("");
+                setError("");
+                setMode({ kind: "new" });
+              }}
+              style={{
+                background: "none",
+                border: "1px dashed var(--border)",
+                borderRadius: 10,
+                color: "var(--text-muted)",
+                fontSize: 13,
+                padding: "10px",
+                cursor: "pointer",
+                transition: "all 0.12s",
+              }}
+            >
               + Criar novo perfil
             </button>
           </>
         )}
 
+        {/* PIN entry */}
         {mode.kind === "pin" && (
           <>
             <input
-              style={input} type="password" inputMode="numeric" autoFocus
-              placeholder="PIN" value={pin}
+              style={{ ...inputStyle, letterSpacing: "0.15em" }}
+              type="password"
+              inputMode="numeric"
+              autoFocus
+              placeholder="PIN"
+              value={pin}
               onChange={(e) => setPin(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter" && pin.length >= 4 && !busy) doLogin(mode.profile); }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && canSubmitPin) doLogin(mode.profile);
+              }}
             />
-            <button type="button" style={primaryBtn} disabled={busy || pin.length < 4} onClick={() => doLogin(mode.profile)}>
+            <button
+              type="button"
+              style={primaryBtnStyle(canSubmitPin)}
+              disabled={!canSubmitPin}
+              onClick={() => doLogin(mode.profile)}
+            >
               {busy ? "Entrando…" : "Entrar"}
             </button>
-            <button type="button" style={linkBtn} onClick={() => { setError(""); setMode({ kind: "list" }); }}>
+            <button
+              type="button"
+              style={linkBtnStyle}
+              onClick={() => {
+                setError("");
+                setMode({ kind: "list" });
+              }}
+            >
               ← Voltar
             </button>
           </>
         )}
 
+        {/* New profile */}
         {mode.kind === "new" && (
           <>
             <input
-              style={input} type="text" autoFocus placeholder="Seu nome"
-              value={name} onChange={(e) => setName(e.target.value)}
+              style={inputStyle}
+              type="text"
+              autoFocus
+              placeholder="Seu nome"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
             />
             <input
-              style={input} type="password" inputMode="numeric"
-              placeholder="Crie um PIN (mín. 4 dígitos)" value={pin}
+              style={{ ...inputStyle, letterSpacing: "0.08em" }}
+              type="password"
+              inputMode="numeric"
+              placeholder="Crie um PIN (mín. 4 dígitos)"
+              value={pin}
               onChange={(e) => setPin(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter" && name.trim() && pin.length >= 4 && !busy) doRegister(); }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && canSubmitNew) doRegister();
+              }}
             />
-            <button type="button" style={primaryBtn} disabled={busy || !name.trim() || pin.length < 4} onClick={doRegister}>
+            <button
+              type="button"
+              style={primaryBtnStyle(canSubmitNew)}
+              disabled={!canSubmitNew}
+              onClick={doRegister}
+            >
               {busy ? "Criando…" : "Criar perfil"}
             </button>
             {profiles.length > 0 && (
-              <button type="button" style={linkBtn} onClick={() => { setError(""); setMode({ kind: "list" }); }}>
+              <button
+                type="button"
+                style={linkBtnStyle}
+                onClick={() => {
+                  setError("");
+                  setMode({ kind: "list" });
+                }}
+              >
                 ← Já tenho um perfil
               </button>
             )}
           </>
         )}
 
+        {/* Error */}
         {error && (
-          <p style={{ margin: 0, fontSize: 13, color: "var(--btn-stop)", textAlign: "center" }}>{error}</p>
+          <p
+            style={{
+              margin: 0,
+              fontSize: 13,
+              color: "var(--danger)",
+              textAlign: "center",
+              padding: "8px 12px",
+              borderRadius: 8,
+              background: "var(--danger-dim)",
+              border: "1px solid var(--danger-border)",
+            }}
+          >
+            {error}
+          </p>
         )}
       </div>
     </div>

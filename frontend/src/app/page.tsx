@@ -2,22 +2,18 @@
 
 import { useState, useRef, useEffect, useCallback } from "react";
 import ProfileGate from "../components/ProfileGate";
+import { MarkdownRenderer } from "../components/MarkdownRenderer";
 import { clearSession, getSession, type Session } from "../lib/auth";
 
-const BUILD_TAG = "v13";
+const BUILD_TAG = "v14";
 const CHAT_URL = process.env.NEXT_PUBLIC_CHAT_API_URL ?? "/api/chat";
 
-/**
- * Gera um UUID. crypto.randomUUID() só existe em contexto seguro
- * (HTTPS ou localhost) — em HTTP via IP de rede (celular) ela é undefined.
- * Por isso há fallback puro em JS.
- */
 function genId(): string {
   try {
     if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
       return crypto.randomUUID();
     }
-  } catch { /* indisponível — usa fallback */ }
+  } catch { /* unavailable */ }
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
     const r = (Math.random() * 16) | 0;
     const v = c === "x" ? r : (r & 0x3) | 0x8;
@@ -25,18 +21,16 @@ function genId(): string {
   });
 }
 
-/** Parse de uma linha SSE "data: {...}". */
 function parseSSELine(line: string): { text?: string; error?: string } {
   if (!line.startsWith("data: ")) return {};
   try {
     const event = JSON.parse(line.slice(6));
     if (event.event === "text") return { text: event.content as string };
     if (event.event === "error") return { error: event.message as string };
-  } catch { /* frame incompleto/ignorável */ }
+  } catch { /* incomplete frame */ }
   return {};
 }
 
-/** Parse do corpo SSE inteiro de uma vez (fallback sem streaming). */
 function parseSSEBuffer(raw: string): string {
   let text = "";
   for (const line of raw.split("\n")) {
@@ -73,62 +67,269 @@ interface ChatMessage {
   content: string;
 }
 
+// ─── Avatars ────────────────────────────────────────────────────────────────
+
+function AssistantAvatar() {
+  return (
+    <div
+      style={{
+        width: 30,
+        height: 30,
+        borderRadius: 8,
+        background: "var(--accent-dim)",
+        border: "1px solid var(--accent-border)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        flexShrink: 0,
+        fontSize: 15,
+      }}
+    >
+      🧠
+    </div>
+  );
+}
+
+function UserAvatar({ name }: { name: string }) {
+  return (
+    <div
+      style={{
+        width: 30,
+        height: 30,
+        borderRadius: "50%",
+        background: "var(--accent)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        flexShrink: 0,
+        fontSize: 13,
+        fontWeight: 700,
+        color: "var(--bg)",
+        userSelect: "none",
+      }}
+    >
+      {name.charAt(0).toUpperCase()}
+    </div>
+  );
+}
+
+// ─── Typing indicator ────────────────────────────────────────────────────────
+
 function TypingDots() {
   return (
-    <span style={{ display: "inline-flex", gap: 4, alignItems: "center", height: 18 }}>
+    <span style={{ display: "inline-flex", gap: 5, alignItems: "center", height: 20 }}>
       {[0, 1, 2].map((i) => (
-        <span key={i} style={{
-          width: 6, height: 6, borderRadius: "50%",
-          background: "var(--text-muted)", display: "inline-block",
-          animation: "blink 1.2s ease-in-out infinite",
-          animationDelay: `${i * 0.2}s`,
-        }} />
+        <span
+          key={i}
+          style={{
+            width: 5,
+            height: 5,
+            borderRadius: "50%",
+            background: "var(--text-muted)",
+            display: "inline-block",
+            animation: "pulseDot 1.2s ease-in-out infinite",
+            animationDelay: `${i * 0.18}s`,
+          }}
+        />
       ))}
     </span>
   );
 }
 
-function MessageBubble({ role, content }: {
-  role: "user" | "assistant"; content: string;
+// ─── Message bubbles ─────────────────────────────────────────────────────────
+
+function MessageBubble({
+  role,
+  content,
+  userName = "U",
+}: {
+  role: "user" | "assistant";
+  content: string;
+  userName?: string;
 }) {
-  const isUser = role === "user";
-  return (
-    <div style={{
-      display: "flex", flexDirection: isUser ? "row-reverse" : "row",
-      alignItems: "flex-end", gap: 8, marginBottom: 12,
-      animation: "fadeSlide 0.18s ease-out",
-    }}>
-      <div style={{
-        flexShrink: 0, width: 32, height: 32, borderRadius: "50%",
-        background: isUser ? "var(--user-bg)" : "var(--surface-alt)",
-        border: "1px solid var(--border)",
-        display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14,
-      }}>
-        {isUser ? "👤" : "🧠"}
+  if (role === "user") {
+    return (
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "flex-end",
+          alignItems: "flex-end",
+          gap: 10,
+          marginBottom: 18,
+          animation: "fadeSlide 0.18s ease-out",
+        }}
+      >
+        <div
+          style={{
+            maxWidth: "70%",
+            padding: "10px 15px",
+            background: "var(--user-bg)",
+            color: "var(--user-text)",
+            borderRadius: "18px 18px 4px 18px",
+            fontSize: 14.5,
+            lineHeight: 1.6,
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-word",
+            boxShadow: "0 2px 8px rgba(0,0,0,0.25)",
+          }}
+        >
+          {content}
+        </div>
+        <UserAvatar name={userName} />
       </div>
-      <div style={{
-        maxWidth: "72%", padding: "10px 14px",
-        borderRadius: isUser ? "18px 18px 4px 18px" : "18px 18px 18px 4px",
-        background: isUser ? "var(--user-bg)" : "var(--assistant-bg)",
-        color: isUser ? "var(--user-text)" : "var(--assistant-text)",
-        boxShadow: "var(--shadow-sm)",
-        border: isUser ? "none" : "1px solid var(--border)",
-        whiteSpace: "pre-wrap", wordBreak: "break-word",
-        lineHeight: 1.55, fontSize: 14,
-      }}>
-        {content}
+    );
+  }
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "flex-start",
+        gap: 12,
+        marginBottom: 22,
+        animation: "fadeSlide 0.18s ease-out",
+      }}
+    >
+      <AssistantAvatar />
+      <div style={{ flex: 1, minWidth: 0, paddingTop: 4 }}>
+        <MarkdownRenderer content={content} />
       </div>
     </div>
   );
 }
 
+// ─── Empty state ─────────────────────────────────────────────────────────────
+
+function EmptyState({ name }: { name: string }) {
+  return (
+    <div
+      style={{
+        flex: 1,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 14,
+        padding: "40px 24px",
+        textAlign: "center",
+        animation: "fadeIn 0.4s ease-out",
+      }}
+    >
+      <div
+        style={{
+          width: 56,
+          height: 56,
+          borderRadius: 16,
+          background: "var(--accent-dim)",
+          border: "1px solid var(--accent-border)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          fontSize: 26,
+          marginBottom: 4,
+        }}
+      >
+        🧠
+      </div>
+      <p
+        style={{
+          margin: 0,
+          fontSize: 17,
+          fontWeight: 700,
+          color: "var(--text)",
+          letterSpacing: "-0.025em",
+        }}
+      >
+        Olá, {name}!
+      </p>
+      <p
+        style={{
+          margin: 0,
+          fontSize: 13.5,
+          maxWidth: 300,
+          lineHeight: 1.65,
+          color: "var(--text-muted)",
+        }}
+      >
+        Lembro de tudo que conversamos antes. Pode perguntar ou continuar de onde paramos.
+      </p>
+    </div>
+  );
+}
+
+// ─── Header buttons ───────────────────────────────────────────────────────────
+
+function HeaderBtn({
+  onClick,
+  title,
+  children,
+}: {
+  onClick: () => void;
+  title?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 5,
+        padding: "5px 11px",
+        borderRadius: 7,
+        border: "1px solid var(--border)",
+        background: "transparent",
+        color: "var(--text-secondary)",
+        fontSize: 12,
+        cursor: "pointer",
+        touchAction: "manipulation",
+        WebkitTapHighlightColor: "transparent",
+        userSelect: "none",
+        transition: "background 0.12s, color 0.12s",
+        letterSpacing: "0.01em",
+      } as React.CSSProperties}
+    >
+      {children}
+    </button>
+  );
+}
+
+// ─── Send / Stop buttons ─────────────────────────────────────────────────────
+
+function SendIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <path
+        d="M8 13V3M4 7l4-4 4 4"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function StopIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden>
+      <rect x="2.5" y="2.5" width="9" height="9" rx="2" stroke="currentColor" strokeWidth="1.6" />
+    </svg>
+  );
+}
+
+// ─── Main page ────────────────────────────────────────────────────────────────
+
 export default function Home() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [hasText, setHasText] = useState(false);   // cosmético: cor do botão
+  const [hasText, setHasText] = useState(false);
   const [streaming, setStreaming] = useState(false);
   const [streamingText, setStreamingText] = useState("");
   const [session, setSession] = useState<Session | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
+  const [inputFocused, setInputFocused] = useState(false);
 
   const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
@@ -137,7 +338,6 @@ export default function Home() {
   const messagesRef = useRef<ChatMessage[]>([]);
   const sessionRef = useRef<Session | null>(null);
 
-  // Load any persisted session on mount (localStorage is client-only).
   useEffect(() => {
     setSession(getSession());
     setAuthChecked(true);
@@ -156,7 +356,6 @@ export default function Home() {
     el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
   }
 
-  /** Lê o texto direto do DOM — fonte única de verdade, imune a falhas de onChange no mobile. */
   function readText(): string {
     return (textareaRef.current?.value ?? "").trim();
   }
@@ -169,7 +368,6 @@ export default function Home() {
     setHasText(false);
   }
 
-  // onInput dispara em TODO input (digitação, colar, swipe, autocorreção) em qualquer navegador.
   function handleInput() {
     setHasText(readText().length > 0);
     resizeTextarea();
@@ -213,7 +411,6 @@ export default function Home() {
       });
 
       if (res.status === 401) {
-        // Token expired/invalid — drop session and show the gate again.
         clearSession();
         setSession(null);
         return;
@@ -221,7 +418,6 @@ export default function Home() {
       if (!res.ok) {
         errorMsg = `HTTP ${res.status} ${res.statusText}`;
       } else if (!res.body || typeof res.body.getReader !== "function") {
-        // Navegador sem streaming de body (alguns mobile): lê tudo de uma vez.
         const raw = await res.text();
         finalReply = parseSSEBuffer(raw);
         setStreamingText(finalReply);
@@ -257,7 +453,6 @@ export default function Home() {
       abortRef.current = null;
     }
 
-    // Sempre mostra algo: a resposta, ou um erro visível (nunca silêncio).
     const content = finalReply.trim() || (errorMsg ? `⚠️ ${errorMsg}` : "");
     if (content) {
       const reply: ChatMessage = { role: "assistant", content };
@@ -293,153 +488,206 @@ export default function Home() {
     setMessages([]);
     setStreamingText("");
     clearTextarea();
-    setSession(null); // keeps the profile list — only ends the session
+    setSession(null);
   }
 
-  // Auth gate: wait for the localStorage check, then require a session.
   if (!authChecked) return null;
   if (!session) {
-    return <ProfileGate onAuthenticated={(s) => { setSession(s); }} />;
+    return <ProfileGate onAuthenticated={(s) => setSession(s)} />;
   }
 
   const isEmpty = messages.length === 0 && !streamingText;
 
   return (
-    <div style={{
-      display: "flex", flexDirection: "column",
-      height: "100dvh", maxWidth: 760, margin: "0 auto",
-      background: "var(--surface)", boxShadow: "var(--shadow-md)",
-      overflow: "hidden",
-    }}>
-
-      {/* Header */}
-      <header style={{
-        display: "flex", alignItems: "center", justifyContent: "space-between",
-        padding: "12px 20px", borderBottom: "1px solid var(--border)",
-        background: "var(--surface)", flexShrink: 0,
-      }}>
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        height: "100dvh",
+        maxWidth: 820,
+        margin: "0 auto",
+        background: "var(--surface)",
+        borderLeft: "1px solid var(--border)",
+        borderRight: "1px solid var(--border)",
+        overflow: "hidden",
+      }}
+    >
+      {/* ── Header ── */}
+      <header
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          padding: "10px 20px",
+          borderBottom: "1px solid var(--border)",
+          background: "var(--surface)",
+          flexShrink: 0,
+          gap: 12,
+        }}
+      >
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <span style={{ fontSize: 22 }}>🧠</span>
+          <div
+            style={{
+              width: 32,
+              height: 32,
+              borderRadius: 9,
+              background: "var(--accent-dim)",
+              border: "1px solid var(--accent-border)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontSize: 16,
+              flexShrink: 0,
+            }}
+          >
+            🧠
+          </div>
           <div>
-            <div style={{ fontWeight: 700, fontSize: 16, lineHeight: 1.2 }}>
-              Memory Chat <span style={{ fontSize: 10, fontWeight: 400, color: "var(--btn-primary)" }}>{BUILD_TAG}</span>
+            <div
+              style={{
+                fontWeight: 700,
+                fontSize: 15,
+                lineHeight: 1.2,
+                letterSpacing: "-0.025em",
+                color: "var(--text)",
+              }}
+            >
+              Memory Chat{" "}
+              <span
+                style={{
+                  fontSize: 10,
+                  fontWeight: 400,
+                  color: "var(--accent)",
+                  letterSpacing: "0.02em",
+                  opacity: 0.7,
+                }}
+              >
+                {BUILD_TAG}
+              </span>
             </div>
-            <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
-              👤 {session.displayName}
+            <div
+              style={{
+                fontSize: 11,
+                color: "var(--text-muted)",
+                letterSpacing: "0.01em",
+              }}
+            >
+              {session.displayName}
             </div>
           </div>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <button
-            type="button"
-            onClick={handleNewConversation}
-            style={{
-              padding: "6px 12px", borderRadius: 8,
-              border: "1px solid var(--border)", background: "transparent",
-              color: "var(--text-muted)", fontSize: 12,
-              display: "flex", alignItems: "center", gap: 5,
-              cursor: "pointer",
-              touchAction: "manipulation",
-              WebkitTapHighlightColor: "transparent",
-              userSelect: "none",
-            } as React.CSSProperties}
-          >
-            ✏️ Nova conversa
-          </button>
-          <button
-            type="button"
-            onClick={handleLogout}
-            title="Trocar de perfil"
-            style={{
-              padding: "6px 12px", borderRadius: 8,
-              border: "1px solid var(--border)", background: "transparent",
-              color: "var(--text-muted)", fontSize: 12,
-              display: "flex", alignItems: "center", gap: 5,
-              cursor: "pointer",
-              touchAction: "manipulation",
-              WebkitTapHighlightColor: "transparent",
-              userSelect: "none",
-            } as React.CSSProperties}
-          >
-            🔄 Trocar
-          </button>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <HeaderBtn onClick={handleNewConversation}>
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
+              <path d="M6 2v8M2 6h8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+            </svg>
+            Nova conversa
+          </HeaderBtn>
+          <HeaderBtn onClick={handleLogout} title="Trocar de perfil">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
+              <path
+                d="M8 2l3 3-3 3M1 5h10M4 10l-3-3 3-3"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+            Trocar
+          </HeaderBtn>
         </div>
       </header>
 
-      {/* Messages */}
-      <div style={{
-        flex: 1, overflowY: "auto", padding: "20px 16px",
-        display: "flex", flexDirection: "column",
-        WebkitOverflowScrolling: "touch",
-      } as React.CSSProperties}>
-        {isEmpty && (
-          <div style={{
-            flex: 1, display: "flex", flexDirection: "column",
-            alignItems: "center", justifyContent: "center",
-            gap: 12, color: "var(--text-muted)", textAlign: "center", padding: "0 24px",
-          }}>
-            <span style={{ fontSize: 48 }}>🧠</span>
-            <p style={{ margin: 0, fontSize: 16, fontWeight: 600, color: "var(--text)" }}>
-              Olá! Eu tenho memória.
-            </p>
-            <p style={{ margin: 0, fontSize: 13, maxWidth: 360 }}>
-              Lembro de conversas anteriores, nomes e contextos. Comece digitando sua mensagem abaixo.
-            </p>
-          </div>
-        )}
+      {/* ── Messages ── */}
+      <div
+        style={{
+          flex: 1,
+          overflowY: "auto",
+          padding: "24px 20px 8px",
+          display: "flex",
+          flexDirection: "column",
+          WebkitOverflowScrolling: "touch",
+        } as React.CSSProperties}
+      >
+        {isEmpty && <EmptyState name={session.displayName} />}
 
         {messages.map((msg, i) => (
-          <MessageBubble key={i} role={msg.role} content={msg.content} />
+          <MessageBubble
+            key={i}
+            role={msg.role}
+            content={msg.content}
+            userName={session.displayName}
+          />
         ))}
 
+        {/* Typing indicator */}
         {streaming && !streamingText && (
-          <div style={{
-            display: "flex", alignItems: "flex-end", gap: 8,
-            marginBottom: 12, animation: "fadeSlide 0.18s ease-out",
-          }}>
-            <div style={{
-              flexShrink: 0, width: 32, height: 32, borderRadius: "50%",
-              background: "var(--surface-alt)", border: "1px solid var(--border)",
-              display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14,
-            }}>🧠</div>
-            <div style={{
-              padding: "10px 14px", borderRadius: "18px 18px 18px 4px",
-              background: "var(--assistant-bg)", border: "1px solid var(--border)",
-              boxShadow: "var(--shadow-sm)",
-            }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "flex-start",
+              gap: 12,
+              marginBottom: 22,
+              animation: "fadeSlide 0.18s ease-out",
+            }}
+          >
+            <AssistantAvatar />
+            <div style={{ paddingTop: 8 }}>
               <TypingDots />
             </div>
           </div>
         )}
 
-        {streamingText && <MessageBubble role="assistant" content={streamingText} />}
+        {streamingText && (
+          <MessageBubble role="assistant" content={streamingText} userName={session.displayName} />
+        )}
+
         <div ref={bottomRef} />
       </div>
 
-      {/* Input area */}
-      <div style={{
-        borderTop: "1px solid var(--border)", padding: "12px 16px",
-        background: "var(--surface)", flexShrink: 0,
-        paddingBottom: "max(12px, env(safe-area-inset-bottom))",
-      }}>
-        <div style={{
-          display: "flex", alignItems: "flex-end", gap: 8,
-          background: "var(--input-bg)",
-          border: `1.5px solid var(--input-border)`,
-          borderRadius: 14, padding: "6px 6px 6px 14px",
-        }}>
+      {/* ── Input area ── */}
+      <div
+        style={{
+          borderTop: "1px solid var(--border)",
+          padding: "12px 20px",
+          background: "var(--surface)",
+          flexShrink: 0,
+          paddingBottom: "max(12px, env(safe-area-inset-bottom))",
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "flex-end",
+            gap: 8,
+            background: "var(--surface-alt)",
+            border: `1.5px solid ${inputFocused ? "var(--accent-border)" : "var(--border)"}`,
+            borderRadius: 14,
+            padding: "8px 8px 8px 16px",
+            transition: "border-color 0.15s",
+          }}
+        >
           <textarea
             ref={textareaRef}
             onInput={handleInput}
             onKeyDown={handleKeyDown}
+            onFocus={() => setInputFocused(true)}
+            onBlur={() => setInputFocused(false)}
             placeholder="Digite uma mensagem…"
             rows={1}
             style={{
-              flex: 1, border: "none", outline: "none",
-              resize: "none", background: "transparent",
-              color: "var(--text)", lineHeight: 1.5,
+              flex: 1,
+              border: "none",
+              outline: "none",
+              resize: "none",
+              background: "transparent",
+              color: "var(--text)",
+              lineHeight: 1.5,
               fontSize: 16,
-              padding: "4px 0", maxHeight: 160, overflowY: "auto",
+              padding: "4px 0",
+              maxHeight: 160,
+              overflowY: "auto",
             }}
           />
 
@@ -447,46 +695,63 @@ export default function Home() {
             <button
               type="button"
               onClick={handleStop}
+              aria-label="Parar resposta"
               style={{
-                flexShrink: 0, width: 44, height: 44, borderRadius: 10,
-                border: "none", background: "var(--btn-stop)", color: "#fff",
-                display: "flex", alignItems: "center", justifyContent: "center",
-                fontSize: 18, cursor: "pointer",
+                flexShrink: 0,
+                width: 38,
+                height: 38,
+                borderRadius: 10,
+                border: "1px solid var(--danger-border)",
+                background: "var(--danger-dim)",
+                color: "var(--danger)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                cursor: "pointer",
                 touchAction: "manipulation",
                 WebkitTapHighlightColor: "transparent",
                 userSelect: "none",
+                transition: "all 0.15s",
               } as React.CSSProperties}
-              aria-label="Parar resposta"
             >
-              ⏹
+              <StopIcon />
             </button>
           ) : (
             <button
               type="button"
               onClick={doSubmit}
+              aria-label="Enviar mensagem"
               style={{
-                flexShrink: 0, width: 44, height: 44, borderRadius: 10,
+                flexShrink: 0,
+                width: 38,
+                height: 38,
+                borderRadius: 10,
                 border: "none",
-                background: "var(--btn-primary)",
-                color: "#fff",
-                opacity: hasText ? 1 : 0.55,
-                display: "flex", alignItems: "center", justifyContent: "center",
-                fontSize: 18, cursor: "pointer",
+                background: hasText ? "var(--accent)" : "var(--surface-hover)",
+                color: hasText ? "var(--bg)" : "var(--text-muted)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                cursor: hasText ? "pointer" : "default",
                 touchAction: "manipulation",
                 WebkitTapHighlightColor: "transparent",
                 userSelect: "none",
-                transition: "opacity 0.15s",
+                transition: "all 0.15s",
               } as React.CSSProperties}
-              aria-label="Enviar mensagem"
             >
-              ➤
+              <SendIcon />
             </button>
           )}
         </div>
-        <p style={{
-          margin: "6px 0 0", fontSize: 11,
-          color: "var(--text-muted)", textAlign: "center",
-        }}>
+        <p
+          style={{
+            margin: "6px 0 0",
+            fontSize: 11,
+            color: "var(--text-muted)",
+            textAlign: "center",
+            letterSpacing: "0.01em",
+          }}
+        >
           Enter para enviar · Shift+Enter para nova linha
         </p>
       </div>
