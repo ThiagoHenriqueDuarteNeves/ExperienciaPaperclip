@@ -24,7 +24,7 @@ import pytest
 import pytest_asyncio
 
 from app.config import settings
-from app.conversation_store import retrieve_thread, search_similar, store_message
+from app.conversation_store import retrieve_thread, search_hybrid, search_similar, store_message
 from app.pgvector_client import (
     close_pool,
     get_pool,
@@ -32,7 +32,15 @@ from app.pgvector_client import (
     search_semantic,
     store_semantic,
 )
-from app.semantic_store import search_semantic_memories, store_semantic_memory
+from app.semantic_store import (
+    search_semantic_memories,
+    search_semantic_memories_hybrid,
+    store_semantic_memory,
+)
+
+# Every test in this module touches live PostgreSQL/pgvector — mark the whole
+# module as integration so the default `-m "not integration"` run skips it.
+pytestmark = pytest.mark.integration
 
 # Unique test user/thread to avoid collisions with production data
 TEST_USER = f"test-user-{uuid.uuid4().hex[:8]}"
@@ -353,6 +361,133 @@ async def test_semantic_memory_search():
     # The job fact should be ranked highly for a work-related query
     high_ranked = results[0]
     assert "Acme" in high_ranked.get("content", "") or "engineer" in high_ranked.get("content", "")
+
+
+# ---------------------------------------------------------------------------
+# Hybrid search (dense + BM25 + RRF)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_hybrid_search_finds_exact_proper_noun():
+    """BM25 leg recovers a message with an exact proper noun missed by dense-only search.
+
+    Stores a message containing a rare name, then searches by that exact name.
+    The hybrid search must return the message even when semantic similarity
+    alone would rank it poorly (name is out-of-distribution for the embedding model).
+    """
+    thread_id = str(uuid.uuid4())
+    rare_name = f"Zylvanus{uuid.uuid4().hex[:6]}"  # virtually unseen in training data
+
+    await store_message(
+        thread_id=thread_id,
+        role="user",
+        content=f"My cat is named {rare_name} and he loves tuna.",
+        metadata={"user_id": TEST_USER},
+    )
+
+    results = await search_hybrid(query=rare_name, user_id=TEST_USER, top_k=5)
+
+    assert len(results) > 0, "Hybrid search returned no results for exact rare name"
+    found = any(rare_name in r.get("content", "") for r in results)
+    assert found, f"Message with rare name '{rare_name}' not found in hybrid results"
+
+
+@pytest.mark.asyncio
+async def test_hybrid_search_result_fields():
+    """Hybrid search results include the required fields: id, content, similarity, rrf_score."""
+    thread_id = str(uuid.uuid4())
+
+    await store_message(
+        thread_id=thread_id,
+        role="user",
+        content="Python is great for data science.",
+        metadata={"user_id": TEST_USER},
+    )
+
+    results = await search_hybrid(query="Python data science", user_id=TEST_USER, top_k=3)
+
+    assert len(results) > 0
+    for r in results:
+        assert "id" in r, "Missing 'id' field"
+        assert "content" in r, "Missing 'content' field"
+        assert "rrf_score" in r, "Missing 'rrf_score' field"
+        assert "similarity" in r, "Missing 'similarity' field"
+        assert r["rrf_score"] > 0, "rrf_score must be positive"
+        assert 0.0 <= r["similarity"] <= 1.0, "similarity out of [0, 1] range"
+
+
+@pytest.mark.asyncio
+async def test_hybrid_search_user_isolation():
+    """Hybrid search must respect user_id scoping just like dense-only search."""
+    thread_id = str(uuid.uuid4())
+    other_user = f"other-user-{uuid.uuid4().hex[:8]}"
+
+    await store_message(
+        thread_id=thread_id,
+        role="user",
+        content="Secret project Omega is highly confidential.",
+        metadata={"user_id": other_user},
+    )
+    await store_message(
+        thread_id=thread_id,
+        role="user",
+        content="I enjoy working on open source projects.",
+        metadata={"user_id": TEST_USER},
+    )
+
+    results = await search_hybrid(query="project confidential", user_id=TEST_USER, top_k=5)
+
+    for r in results:
+        meta = r.get("metadata") or {}
+        assert meta.get("user_id") != other_user, "Hybrid search leaked another user's data"
+
+
+@pytest.mark.asyncio
+async def test_hybrid_semantic_search_finds_exact_key():
+    """Hybrid semantic search returns facts by exact keyword matching via BM25."""
+    unique_word = f"Xanthopsia{uuid.uuid4().hex[:4]}"
+
+    await store_semantic_memory(
+        user_id=TEST_USER,
+        key=f"condition-{unique_word}",
+        content=f"User has a rare condition called {unique_word}.",
+        importance=0.6,
+    )
+
+    results = await search_semantic_memories_hybrid(
+        query=unique_word, user_id=TEST_USER, top_k=5,
+    )
+
+    assert len(results) > 0, "Hybrid semantic search returned nothing for exact rare word"
+    found = any(unique_word in r.get("content", "") for r in results)
+    assert found, f"Fact with rare word '{unique_word}' not found in hybrid semantic results"
+
+    for r in results:
+        assert "rrf_score" in r, "Hybrid semantic result missing rrf_score"
+        assert "key" in r, "Hybrid semantic result missing key"
+
+
+@pytest.mark.asyncio
+async def test_hybrid_fallback_when_no_fts_match():
+    """When BM25 finds no matches, hybrid must still return dense results."""
+    thread_id = str(uuid.uuid4())
+
+    await store_message(
+        thread_id=thread_id,
+        role="user",
+        content="The weather in Porto Alegre is pleasant this time of year.",
+        metadata={"user_id": TEST_USER},
+    )
+
+    # Query with synonym / paraphrase — no lexical overlap expected
+    results = await search_hybrid(
+        query="climate conditions southern Brazil city", user_id=TEST_USER, top_k=3,
+    )
+
+    assert len(results) > 0, "Hybrid search must fall back to dense when BM25 finds nothing"
+    for r in results:
+        assert r["rrf_score"] > 0
 
 
 # ---------------------------------------------------------------------------

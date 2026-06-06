@@ -3,6 +3,13 @@ uvicorn[standard]>=0.34.0,<1.0.0
 slowapi>=0.1.9,<1.0.0
 chromadb>=0.6.0,<1.0.0
 sentence-transformers>=3.4.0,<4.0.0
+# Pin the transformers/torch stack: transformers >=4.50 loads models on the
+# "meta" device by default, which sentence-transformers 3.4.x cannot materialize
+# ("Cannot copy out of meta tensor"). 4.49.x is the last line that loads e5-large
+# (1024-dim) cleanly. Upper-bound torch too so a future major can't silently break
+# a rebuild (current 2.12 satisfies this — no re-download).
+transformers>=4.44.0,<4.50.0
+torch>=2.2.0,<3.0.0
 pydantic-settings>=2.7.0,<3.0.0
 neo4j>=5.27.0,<6.0.0
 httpx>=0.28.0,<1.0.0

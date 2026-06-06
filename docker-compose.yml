@@ -102,7 +102,17 @@ services:
       - MEMORY_LETTA_BASE_URL=http://letta:8283
       - MEMORY_LETTA_API_KEY=${LETTA_API_KEY:-letta-local-dev-key}
       - MEMORY_AUTH_SECRET=${MEMORY_AUTH_SECRET:-dev-insecure-auth-secret-change-me}
+      # Memory inspector (/inspect). OFF by default; set INSPECT_ENABLED=true in
+      # .env to enable. Data endpoints require an admin token (is_admin profile),
+      # so it's safe to expose via zrok — but only enable where you need it.
+      - MEMORY_INSPECT_ENABLED=${INSPECT_ENABLED:-false}
       - MEMORY_LLM_PROVIDER=${LLM_PROVIDER:-anthropic}
+      # LLM endpoint (Anthropic-Messages-compatible). Leave LLM_API_BASE empty to
+      # use the per-provider default below; set it to override (e.g. local proxy).
+      - MEMORY_LLM_API_BASE=${LLM_API_BASE:-}
+      - MEMORY_DEEPSEEK_API_BASE=${DEEPSEEK_API_BASE:-https://api.deepseek.com/anthropic}
+      - MEMORY_ANTHROPIC_API_BASE=${ANTHROPIC_API_BASE:-https://api.anthropic.com/v1}
+      - MEMORY_CLAUDE_MODEL=${CLAUDE_MODEL:-claude-sonnet-4-20250506}
       # Embedding configuration — embeddings are always API-based (1536-dim).
       # For Deepseek: set DEEPSEEK_API_KEY in .env (endpoint resolved automatically).
       # For custom provider: set both MEMORY_EMBEDDING_API_BASE and MEMORY_EMBEDDING_API_KEY.
@@ -113,6 +123,9 @@ services:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
     volumes:
       - ./migrations:/migrations
+      # Persist the HuggingFace/torch model cache so the embedding model
+      # (intfloat/multilingual-e5-large, ~2GB) isn't re-downloaded on every rebuild.
+      - hf_cache:/root/.cache
     depends_on:
       memory-db:
         condition: service_healthy
@@ -129,3 +142,4 @@ volumes:
   neo4j_data:
   letta_db_data:
   letta_data:
+  hf_cache:

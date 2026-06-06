@@ -1,6 +1,11 @@
 __pycache__/
 *.pyc
 *.pyo
+.venv/
+venv/
+.pytest_cache/
+*.log
+zrok-tunnel.log
 .env
 .env.local
 .env.*.local

@@ -10,6 +10,7 @@ from app.embeddings import embed_text_async
 from app.pgvector_client import (
     load_thread as _load_thread,
     search_similar as _search_similar,
+    search_similar_hybrid as _search_similar_hybrid,
     store_message as _store_message,
 )
 
@@ -49,4 +50,22 @@ async def search_similar(
         user_id=user_id,
         top_k=top_k,
         min_similarity=min_similarity,
+    )
+
+
+async def search_hybrid(
+    query: str,
+    top_k: int = 5,
+    user_id: str | None = None,
+) -> list[dict]:
+    """Hybrid dense + BM25 search with RRF fusion. Embedding computed automatically."""
+    from app.config import settings
+    embedding = await embed_text_async(query, is_query=True)
+    return await _search_similar_hybrid(
+        embedding=embedding,
+        query_text=query,
+        user_id=user_id,
+        top_k=top_k,
+        rrf_k=settings.rrf_k,
+        fts_language=settings.fts_language,
     )

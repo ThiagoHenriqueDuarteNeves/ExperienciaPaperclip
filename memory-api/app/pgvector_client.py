@@ -299,12 +299,44 @@ async def store_semantic(
             """INSERT INTO semantic_memory (user_id, key, content, embedding, importance)
                VALUES ($1, $2, $3, $4::vector, $5)
                ON CONFLICT (user_id, key)
-               DO UPDATE SET content = $3, embedding = $4::vector,
-                             importance = $5, updated_at = NOW()
+               DO UPDATE SET content = EXCLUDED.content,
+                             embedding = EXCLUDED.embedding,
+                             importance = GREATEST(semantic_memory.importance, EXCLUDED.importance),
+                             updated_at = NOW()
                RETURNING id""",
             user_id, key, content, vec, importance,
         )
         return str(row["id"])
+
+
+async def get_semantic_fact_by_key(user_id: str, key: str) -> dict | None:
+    """Fetch a single profile fact by its canonical key (e.g. 'nome')."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT id, user_id, key, content, importance
+               FROM semantic_memory WHERE user_id = $1 AND key = $2""",
+            user_id, key,
+        )
+        return _serialize_row(row) if row else None
+
+
+async def get_top_semantic_facts(
+    user_id: str | None = None,
+    top_k: int = 5,
+) -> list[dict]:
+    """Return a user's most important profile facts (no query — the durable profile)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT id, user_id, key, content, importance, updated_at
+               FROM semantic_memory
+               WHERE ($1::text IS NULL OR user_id = $1)
+               ORDER BY importance DESC, updated_at DESC
+               LIMIT $2""",
+            user_id, top_k,
+        )
+        return [_serialize_row(r) for r in rows]
 
 
 async def search_semantic(
@@ -491,7 +523,8 @@ async def get_user_profile(user_id: str) -> dict | None:
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            """SELECT user_id, display_name, pin_hash, pin_salt, created_at
+            """SELECT user_id, display_name, pin_hash, pin_salt, created_at,
+                      COALESCE(is_admin, FALSE) AS is_admin
                FROM user_profiles WHERE user_id = $1""",
             user_id,
         )

@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>🔍 Memory Inspector</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel2: #1e222b; --border: #2a2f3a;
+    --text: #e6e9ef; --muted: #8b93a7; --accent: #6aa3ff; --accent2: #9d7bff;
+    --good: #4ec98a; --warn: #e0b34a; --bad: #e06a6a;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  header { padding: 14px 20px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap; background: var(--panel); }
+  h1 { font-size: 17px; margin: 0; }
+  .muted { color: var(--muted); }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  input, textarea, select, button {
+    font: inherit; color: var(--text); background: var(--panel2);
+    border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+  textarea { width: 100%; resize: vertical; min-height: 64px; font-family: inherit; }
+  button { cursor: pointer; background: var(--accent); color: #0a1020; border: none; font-weight: 600; }
+  button.ghost { background: var(--panel2); color: var(--text); border: 1px solid var(--border); font-weight: 500; }
+  button:hover { filter: brightness(1.08); }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 18px 20px 60px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 16px; margin-bottom: 18px; }
+  .card h2 { margin: 0 0 12px; font-size: 15px; }
+  .badges { display: flex; gap: 8px; flex-wrap: wrap; }
+  .badge { background: var(--panel2); border: 1px solid var(--border); border-radius: 999px;
+    padding: 3px 10px; font-size: 12px; }
+  .badge b { color: var(--accent); }
+  .tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+  .tab { padding: 7px 12px; border-radius: 8px; background: var(--panel2);
+    border: 1px solid var(--border); cursor: pointer; font-size: 13px; }
+  .tab.active { background: var(--accent); color: #0a1020; border-color: transparent; font-weight: 600; }
+  pre { background: #0b0d12; border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px; overflow: auto; font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap; word-break: break-word; }
+  .layer { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; overflow: hidden; }
+  .layer > summary { padding: 9px 12px; cursor: pointer; background: var(--panel2); font-weight: 600; }
+  .layer .item { padding: 9px 12px; border-top: 1px solid var(--border); font-size: 13px; }
+  .item .meta { color: var(--muted); font-size: 11.5px; margin-top: 3px; font-family: var(--mono); }
+  .sim { color: var(--good); font-family: var(--mono); }
+  .pill { display:inline-block; font-size: 11px; padding: 1px 7px; border-radius: 999px;
+    background: var(--panel2); border: 1px solid var(--border); margin-right: 5px; }
+  .err { color: var(--bad); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 9px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--panel); }
+  td.content { max-width: 560px; }
+  .hint { font-size: 12px; color: var(--muted); }
+  .spin { color: var(--accent); }
+</style>
+</head>
+<body>
+
+<!-- LOGIN OVERLAY -->
+<div id="loginOverlay" style="display:none; position:fixed; inset:0; z-index:50;
+     background:var(--bg); align-items:center; justify-content:center;">
+  <div class="card" style="width:340px; max-width:90vw; margin:0">
+    <h2>🔒 Acesso restrito (admin)</h2>
+    <p class="hint">O inspetor expõe todas as memórias. Entre com uma conta <b>admin</b>.</p>
+    <div style="display:flex; flex-direction:column; gap:10px; margin-top:6px">
+      <input id="loginUser" placeholder="user_id" autocomplete="username" />
+      <input id="loginPin" type="password" placeholder="PIN" autocomplete="current-password" />
+      <button id="loginBtn">Entrar</button>
+      <div id="loginErr" class="err" style="font-size:12px; min-height:16px"></div>
+    </div>
+  </div>
+</div>
+
+<div id="app" style="display:none">
+<header>
+  <h1>🔍 Memory Inspector</h1>
+  <div class="row">
+    <label class="muted" for="user">user_id</label>
+    <input id="user" placeholder="(todos)" style="width:160px" list="users" />
+    <datalist id="users"></datalist>
+  </div>
+  <div id="overview" class="badges muted">carregando…</div>
+  <button class="ghost" style="margin-left:auto" onclick="logout()">Sair</button>
+</header>
+
+<div class="wrap">
+
+  <!-- RECALL PREVIEW -->
+  <div class="card">
+    <h2>🧠 Preview de recall — o que seria enviado ao LLM</h2>
+    <p class="hint">Digite um prompt como se fosse o usuário. Mostra exatamente as memórias recuperadas e o <code>system</code> montado — <b>sem chamar o LLM</b> e sem gravar nada.</p>
+    <textarea id="prompt" placeholder="Ex.: qual é o nome do meu cachorro?"></textarea>
+    <div class="row" style="margin-top:10px">
+      <button onclick="doRecall()">Preview</button>
+      <span id="recallStatus" class="hint"></span>
+    </div>
+    <div id="recallOut"></div>
+  </div>
+
+  <!-- BROWSE -->
+  <div class="card">
+    <h2>🗄️ Navegar nos bancos</h2>
+    <div class="tabs" id="tabs"></div>
+    <div class="row" style="margin-bottom:10px">
+      <input id="q" placeholder="filtrar por texto…" style="flex:1; min-width:200px" />
+      <button class="ghost" onclick="loadBank()">Buscar</button>
+      <span id="bankStatus" class="hint"></span>
+    </div>
+    <div id="bankOut"></div>
+  </div>
+
+</div>
+</div><!-- /#app -->
+
+<script>
+const BANKS = [
+  ["conversations", "Conversas (pg)"],
+  ["semantic", "Semântica (pg)"],
+  ["aurora", "Aurora (afetiva)"],
+  ["episodic", "Episódica (Chroma)"],
+  ["graph", "Grafo (Neo4j)"],
+];
+let activeBank = "conversations";
+
+const $ = (id) => document.getElementById(id);
+// Escapes &<>"' so untrusted strings (LLM-extracted entity names, user content)
+// are safe in BOTH text and attribute contexts.
+const ESC_MAP = {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"};
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ESC_MAP[c]);
+const userId = () => $("user").value.trim();
+
+// --- auth (admin token) ---
+const TOKEN_KEY = "inspect_admin_token";
+const getToken = () => localStorage.getItem(TOKEN_KEY) || "";
+const setToken = (t) => localStorage.setItem(TOKEN_KEY, t);
+const clearToken = () => localStorage.removeItem(TOKEN_KEY);
+
+async function api(path, opts) {
+  opts = opts || {};
+  const headers = Object.assign({}, opts.headers || {});
+  const tok = getToken();
+  if (tok) headers["Authorization"] = "Bearer " + tok;
+  const r = await fetch(path, Object.assign({}, opts, { headers }));
+  if (r.status === 401 || r.status === 403) {
+    // Token missing/expired or not an admin → force re-login.
+    clearToken();
+    showLogin(r.status === 403
+      ? "Esta conta não é admin. Entre com uma conta admin."
+      : "Sessão expirada. Entre novamente.");
+    throw new Error(r.status === 403 ? "admin access required" : "authentication required");
+  }
+  if (!r.ok) {
+    let d = `HTTP ${r.status}`;
+    try { d = (await r.json()).detail || d; } catch {}
+    throw new Error(d);
+  }
+  return r.json();
+}
+
+async function loadOverview() {
+  try {
+    const o = await api("/inspect/overview");
+    const b = o.banks;
+    $("overview").innerHTML =
+      `<span class="badge">conversas <b>${b.conversations}</b></span>` +
+      `<span class="badge">semântica <b>${b.semantic}</b></span>` +
+      `<span class="badge">aurora <b>${b.aurora}</b></span>` +
+      `<span class="badge">episódica <b>${b.episodic ?? "—"}</b></span>` +
+      `<span class="badge">grafo <b>${b.graph_entities ?? "—"}</b> nós / <b>${b.graph_edges ?? "—"}</b> arestas</span>`;
+    const dl = $("users");
+    dl.innerHTML = o.users.map(u => `<option value="${esc(u.user_id)}">${esc(u.display_name||"")}</option>`).join("");
+  } catch (e) {
+    $("overview").innerHTML = `<span class="err">inspetor desabilitado ou erro: ${esc(e.message)}</span>`;
+  }
+}
+
+function renderLayer(name, items) {
+  if (!items || !items.length) return `<details class="layer"><summary>${name} <span class="muted">(0)</span></summary></details>`;
+  const rows = items.map(m => {
+    const sim = m.similarity != null ? `<span class="sim">sim ${(+m.similarity).toFixed(3)}</span> ` : "";
+    const content = m.content || m.fato || JSON.stringify(m);
+    const extra = m.tipo ? `<span class="pill">${esc(m.tipo)}</span><span class="pill">tom ${esc(m.tom_do_usuario||"")}</span>` : "";
+    return `<div class="item">${sim}${extra}${esc(content)}</div>`;
+  }).join("");
+  return `<details class="layer" open><summary>${name} <span class="muted">(${items.length})</span></summary>${rows}</details>`;
+}
+
+async function doRecall() {
+  const prompt = $("prompt").value.trim();
+  if (!prompt) return;
+  $("recallStatus").innerHTML = `<span class="spin">recuperando…</span>`;
+  $("recallOut").innerHTML = "";
+  try {
+    const r = await api("/inspect/recall", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ prompt, user_id: userId() || null }),
+    });
+    const c = r.counts;
+    let html = `<div class="badges" style="margin:12px 0">
+      <span class="badge">identity <b>${c.identity}</b></span>
+      <span class="badge">episodic <b>${c.episodic}</b></span>
+      <span class="badge">conversation <b>${c.conversation}</b></span>
+      <span class="badge">aurora <b>${c.aurora}</b></span></div>`;
+    html += renderLayer("Identidade (semântica)", r.layers.identity);
+    html += renderLayer("Episódica (Chroma)", r.layers.episodic);
+    html += renderLayer("Conversa (pgvector)", r.layers.conversation);
+    html += renderLayer("Aurora (afetiva)", r.layers.aurora);
+    html += `<h3 style="margin:16px 0 6px">📤 system enviado ao LLM</h3>
+      <p class="hint">É literalmente o array <code>system</code> + <code>messages</code> da requisição (sem o histórico, que vem do cliente).</p>
+      <pre>${esc(JSON.stringify(r.llm_payload, null, 2))}</pre>`;
+    $("recallOut").innerHTML = html;
+    $("recallStatus").textContent = "";
+  } catch (e) {
+    $("recallStatus").innerHTML = `<span class="err">${esc(e.message)}</span>`;
+  }
+}
+
+function renderTabs() {
+  $("tabs").innerHTML = BANKS.map(([k, label]) =>
+    `<div class="tab ${k===activeBank?"active":""}" onclick="selectBank('${k}')">${label}</div>`).join("");
+}
+function selectBank(k) { activeBank = k; renderTabs(); $("bankOut").innerHTML=""; loadBank(); }
+
+function table(rows, cols) {
+  if (!rows.length) return `<p class="hint">nenhum registro.</p>`;
+  const head = cols.map(c => `<th>${c[0]}</th>`).join("");
+  const body = rows.map(r => "<tr>" + cols.map(c => {
+    const v = c[1](r);
+    return `<td class="${c[2]||""}">${v}</td>`;
+  }).join("") + "</tr>").join("");
+  return `<div style="overflow:auto;max-height:520px"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+}
+
+async function loadBank() {
+  const q = $("q").value.trim();
+  const uid = userId();
+  const p = new URLSearchParams();
+  if (q) p.set("q", q);
+  if (uid && activeBank !== "graph") p.set("user_id", uid);
+  $("bankStatus").innerHTML = `<span class="spin">buscando…</span>`;
+  try {
+    const r = await api(`/inspect/bank/${activeBank}?` + p.toString());
+    $("bankStatus").textContent = `${r.count} registro(s)`;
+    const rows = r.rows;
+    let out = "";
+    if (activeBank === "conversations") {
+      out = table(rows, [
+        ["quando", x => esc((x.created_at||"").slice(0,19).replace("T"," ")), "meta"],
+        ["role", x => `<span class="pill">${esc(x.role)}</span>`],
+        ["user", x => esc((x.metadata||{}).user_id||"")],
+        ["conteúdo", x => esc(x.content), "content"],
+      ]);
+    } else if (activeBank === "semantic") {
+      out = table(rows, [
+        ["key", x => `<span class="pill">${esc(x.key)}</span>`],
+        ["user", x => esc(x.user_id)],
+        ["imp", x => esc(x.importance), "meta"],
+        ["conteúdo", x => esc(x.content), "content"],
+      ]);
+    } else if (activeBank === "aurora") {
+      out = table(rows, [
+        ["quando", x => esc((x.created_at||"").slice(0,10)), "meta"],
+        ["tipo", x => `<span class="pill">${esc(x.tipo)}</span>`],
+        ["tom", x => esc(x.tom_do_usuario)],
+        ["imp", x => esc(x.importancia), "meta"],
+        ["fato", x => esc(x.fato) + (x.bilhete_interno?`<div class="meta">📝 ${esc(x.bilhete_interno)}</div>`:""), "content"],
+      ]);
+    } else if (activeBank === "episodic") {
+      out = table(rows, [
+        ["id", x => esc((x.id||"").slice(0,8)), "meta"],
+        ["user", x => esc((x.metadata||{}).user_id||"")],
+        ["documento", x => esc(x.content), "content"],
+      ]);
+    } else if (activeBank === "graph") {
+      out = `<p class="hint">Clique numa entidade para ver a vizinhança.</p>` + table(rows, [
+        // data-entity (escaped) + delegated handler — never inject the name into JS/onclick.
+        ["entidade", x => `<a href="#" class="entity-link" data-entity="${esc(x.name)}" style="color:var(--accent)">${esc(x.name)}</a>`],
+        ["tipo", x => `<span class="pill">${esc(x.type)}</span>`],
+        ["descrição", x => esc(x.description), "content"],
+      ]);
+    }
+    $("bankOut").innerHTML = out;
+  } catch (e) {
+    $("bankStatus").innerHTML = `<span class="err">${esc(e.message)}</span>`;
+  }
+}
+
+async function graphEntity(name) {
+  try {
+    const g = await api(`/inspect/bank/graph?entity=${encodeURIComponent(name)}`);
+    const rels = (g.relationships||[]).map(r =>
+      `<div class="item">${esc(r.source_name)} <span class="pill">${esc(r.rel_type)}</span> ${esc(r.target_name)} <span class="meta">${esc(JSON.stringify(r.properties||{}))}</span></div>`).join("") || `<div class="item muted">sem relações</div>`;
+    $("bankOut").innerHTML = `<div class="card"><h2>🕸️ ${esc(name)}</h2>
+      <p class="hint">${esc((g.entity||{}).description||"")}</p>${rels}
+      <button class="ghost" style="margin-top:10px" onclick="loadBank()">← voltar</button></div>`;
+  } catch (e) {
+    $("bankStatus").innerHTML = `<span class="err">${esc(e.message)}</span>`;
+  }
+}
+
+// Delegated handler for entity drill-down links (no inline JS → no injection).
+$("bankOut").addEventListener("click", e => {
+  const a = e.target.closest(".entity-link");
+  if (!a) return;
+  e.preventDefault();
+  graphEntity(a.dataset.entity);
+});
+
+// --- login flow ---
+function showLogin(msg) {
+  $("app").style.display = "none";
+  $("loginOverlay").style.display = "flex";
+  $("loginErr").textContent = msg || "";
+  $("loginUser").focus();
+}
+function hideLogin() {
+  $("loginOverlay").style.display = "none";
+  $("app").style.display = "";
+}
+async function doLogin() {
+  const user_id = $("loginUser").value.trim();
+  const pin = $("loginPin").value;
+  if (!user_id || !pin) { $("loginErr").textContent = "Informe user_id e PIN."; return; }
+  $("loginErr").textContent = "";
+  $("loginBtn").disabled = true;
+  try {
+    // Don't use api() here (it would redirect to login on 401 mid-login).
+    const r = await fetch("/auth/login", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ user_id, pin }),
+    });
+    if (!r.ok) {
+      let d = `HTTP ${r.status}`;
+      try { d = (await r.json()).detail || d; } catch {}
+      throw new Error(d);
+    }
+    const data = await r.json();
+    setToken(data.token);
+    $("loginPin").value = "";
+    hideLogin();
+    init();
+  } catch (e) {
+    $("loginErr").textContent = e.message;
+  } finally {
+    $("loginBtn").disabled = false;
+  }
+}
+function logout() { clearToken(); showLogin("Você saiu."); }
+
+// init (app) — only runs once authenticated.
+function init() {
+  renderTabs();
+  loadOverview();
+  loadBank();
+}
+$("prompt").addEventListener("keydown", e => { if (e.key==="Enter" && (e.ctrlKey||e.metaKey)) doRecall(); });
+$("loginBtn").addEventListener("click", doLogin);
+$("loginPin").addEventListener("keydown", e => { if (e.key==="Enter") doLogin(); });
+$("loginUser").addEventListener("keydown", e => { if (e.key==="Enter") $("loginPin").focus(); });
+
+// Boot: if we have a token, try the app; otherwise show login.
+if (getToken()) { hideLogin(); init(); } else { showLogin(); }
+</script>
+</body>
+</html>
