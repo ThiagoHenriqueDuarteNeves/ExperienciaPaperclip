@@ -1,4 +1,4 @@
-# Experiência Paperclip — Assistente com Memória Persistente
+# Assistente com Memória Persistente
 
 Um chatbot que **lembra**. Em vez de esquecer tudo a cada conversa, o assistente
 mantém memória de longo prazo em camadas — o que aconteceu, fatos sobre você, as
