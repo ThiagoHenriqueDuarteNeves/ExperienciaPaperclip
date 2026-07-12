@@ -1,9 +1,7 @@
 # Memory Architecture for LLM Agents: Technical Report & Recommendation
 
-**Issue:** THI-35
-**Author:** CTO (f1a8ab46)
 **Date:** 2026-05-16
-**Context:** Primeira Missão do MemoryEngineer — research to base implementation of Phases 1-3 of the memory-chat-bot project.
+**Context:** Research to base implementation of Phases 1-3 of the memory-chat-bot project.
 
 ---
 

@@ -56,6 +56,14 @@ exatamente o que vai ao LLM.
   local como LM Studio) — configurável por env var.
 - **Embeddings:** `intfloat/multilingual-e5-large` (1024-dim, local) ou um provider
   via API (OpenAI-compat).
+- **Re-rank (opcional):** cross-encoder multilingual (`sentence-transformers`) sobre
+  os candidatos recuperados, desligado por padrão — se falhar ou estiver desligado,
+  cai de volta na ordenação por similaridade sem quebrar o recall.
+- **Agentes:** LangGraph com checkpointer em Postgres (módulo isolado, ainda não
+  ligado ao fluxo principal de chat); servidor MCP (Model Context Protocol) que
+  expõe as operações de memória (`store_message`, `search_memories`, `get_context`,
+  `store_semantic_fact`) como tools via stdio, para uso por clientes MCP externos.
+- **Auth:** autenticação por PIN com token assinado (HMAC) e perfis de usuário/admin.
 - **Bancos:** PostgreSQL 16 + pgvector, ChromaDB, Neo4j 5, Letta.
 - **Frontend:** Next.js 16, React 19.
 
@@ -133,20 +141,33 @@ Detalhes em [memory-api/tests/README.md](memory-api/tests/README.md).
 ## Estrutura
 
 ```
-frontend/                  Interface de chat (Next.js)
+frontend/src/
+  app/                     rotas Next.js (chat, auth, layout)
+  components/              ProfileGate (gate de login), MarkdownRenderer
+  lib/                     clientes de auth, memory-api e Claude
+
 memory-api/app/
-  main.py                  FastAPI app + rotas
+  main.py                  FastAPI app, monta os routers
+  routers/                 rotas HTTP: chat, auth, memory, episodic, graph, aurora, letta, system
   chat_pipeline.py         recall + montagem do prompt (chat e inspetor)
   llm_client.py            cliente unificado do LLM
+  auth.py                  hash de PIN (pbkdf2) + tokens de sessão assinados (HMAC)
   schemas.py               modelos Pydantic
   retrieval.py             memória episódica (ChromaDB)
   conversation_store.py    memória conversacional (pgvector)
+  conversation_loop.py     orquestração do turno de conversa
   semantic_store.py        perfil semântico (pgvector)
   aurora_store.py          memória afetiva (pgvector)
-  neo4j_client.py          grafo de conhecimento
+  neo4j_client.py          driver do grafo de conhecimento
+  kg_retrieval.py          consultas de recall sobre o grafo
   *_extractor.py           extração via LLM (entidades, aurora, fatos semânticos)
+  reranker.py              re-rank opcional dos candidatos recuperados (cross-encoder)
+  rate_limit.py            limitação de requisições (slowapi)
+  langgraph_agent.py       agente LangGraph com checkpointer em Postgres (módulo isolado)
+  mcp_memory_server.py     servidor MCP que expõe a memória como tools
   inspect_api.py           inspetor (/inspect)
-  scripts/                 reprocessamento de grafo / backfill semântico
+  scripts/                 reprocessamento de grafo / backfill semântico / criação de admin
+
 migrations/                schema SQL (init + migrações versionadas)
 ```
 
